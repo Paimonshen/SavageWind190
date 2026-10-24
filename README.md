@@ -1,4 +1,77 @@
-# Savage Wind Recomp
+# Savage Wind Recomp — SavageWind190（旷野之息 1.9.0 Windows 移植）
+
+> **本仓库（`port-190` 分支）= 上游 [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp) `test` 分支 + 1.9.0 移植验证与数据前置管线。**
+> 上游 test 分支已原生支持 BOTW 1.9.0（`tools/game_sites.py` 登记 build id `cd57b23fa4bbad65`，与 1.9.0 更新包完全一致）；
+> 本仓库补上了从**你自己的 `botw.nsp`** 到可玩状态的完整工具链，并在 Windows x64 + Vulkan（Intel Arc B580）上完成了实机验证。
+
+## 功能状态（本机实测，2026-10-24）
+
+| 已验证可用 | 说明 |
+|---|---|
+| 完整启动 | `nn::init::Start` 起全链路，标题流程正常进入 |
+| 渲染 | Vulkan 1.4（管线缓存 + 13,997 着色器全量预编译，192MB 缓存） |
+| 帧率 | 平均 ~54fps（160Hz 显示器，目标 60），异步着色器编译开启 |
+| 音频 / 存档 / 输入 | 上游 Alpha 2 状态：开局+初始台地可玩（更远进度未验证，见 [docs/GAPS-1.9.0.md](docs/GAPS-1.9.0.md)） |
+| 数据链 | botw.nsp →（pinned hactool）→ exefs/romfs/字体，SHA-256 全程校验 |
+
+## 运行指南
+
+### 路径 A：从本仓库源码运行（开发者/本机，推荐）
+
+前置：Windows 10+ x64、AVX2 CPU、Vulkan 1.3 显卡、约 35GB 空闲磁盘、自己的 `botw.nsp`（本体+1.9.0 更新+DLC 合一包）、`prod.keys`、固件 NCA 目录。
+
+```bat
+:: 1. 一次性环境（装 MSYS2 全套工具链 + Python 3.12 + venv，可重跑）
+powershell -ExecutionPolicy Bypass -File tools\setup_windows.ps1
+
+:: 2. 数据提取（约 30-60 分钟；工具链默认取 ..\..\tools，可用 WNG_TOOLS 覆盖）
+python extraction\build_app_win.py <botw.nsp 路径> -k <prod.keys 路径> --firmware <固件NCA目录>
+::    产物: <work>\extracted\botw190\{exefs, romfs\romfs.bin, fonts}
+
+:: 3. 布置 extracted/（exefs 拷贝 + romfs 解包成目录树 + 字体改名）
+xcopy /E /I <work>\extracted\botw190\exefs extracted\exefs
+python extraction\romfs_unpack.py <work>\extracted\botw190\romfs\romfs.bin extracted\romfs
+copy <work>\extracted\botw190\fonts\0-standard.bfttf fonts\nintendo_udsg-r_std_003.bfttf
+copy <work>\extracted\botw190\fonts\5-nintendo-extension.bfttf fonts\nintendo_ext_003.bfttf
+
+:: 4. 构建（MSYS2 UCRT64 shell 或先把 C:\msys64\ucrt64\bin 放进 PATH）
+make gen        :: 从 extracted\exefs 重编译游戏代码（617MB C，几分钟）
+make -j         :: savagewind.exe + swgame.dll（约 10-20 分钟）
+copy build\swgame.dll build\swgame.dll.id extracted\
+
+:: 5. 打包数据镜像（15GB，约 10 分钟）——没有它启动器会一直要求"设置游戏文件"
+build\savagewind.exe --build-romfs
+
+:: 6. 以后每次启动：双击
+play.cmd
+```
+
+常见坑（都踩过，详见 [docs/PORT-190.md](docs/PORT-190.md)）：
+- **必须从仓库根目录启动**（`play.cmd` 已处理好）：工作目录里有 `extracted\` 才会跳过启动器直接进游戏；
+- 启动器的"选择游戏文件"**不能选它自己数据根里面的文件夹**（防自删保护），本仓库布局下请直接用 `play.cmd`；
+- `extracted\romfs.bin` 是"游戏就绪"判定的必要件，别跳过第 5 步。
+
+### 路径 B：发行包运行（普通玩家）
+
+下载 [Releases](https://github.com/Paimonshen/SavageWind190/releases) 里的 `SavageWind-*-windows.zip`，解压到可写文件夹（不要 Program Files），运行 `savagewind.exe`，首次按提示选择**你自己提取好的** `exefs/`+`romfs/` 所在文件夹（版本 1.9.0），它会校验、复制并在这台机器上重编译游戏代码（约 40 分钟，一次性）。之后双击即玩。**发行包不含任何游戏内容。**
+
+### 性能建议
+
+首次进入新区域会有一过性卡顿（资源流送+新着色器）；设置里 `async_shaders` 打开后新管线后台编译。可随时在游戏目录跑 `build\savagewind.exe --precompile-shaders` 全量预热（约 3 分钟）。游戏内暂停菜单 > 系统 > 选项里有语言、帧率、滤镜等全部 PC 选项（F1/Esc 呼出）。
+
+## 本仓库相对上游的改动
+
+- `extraction/`：P1 数据管线（pinned hactool 自动拉取构建、ExeFS/RomFS/DLC 提取与 SHA-256 pin、`romfs_unpack.py` 镜像→目录树）
+- `docs/PORT-190.md`：1.8.2→1.9.0 移植全过程与结论（上游 test 已支持 1.9.0 的证据链）
+- `docs/GAPS-1.9.0.md`：1.9.0 已知缺口清单（53 个 NVN 入口分类、lifter 边界、上游同步策略）
+- `play.cmd`：dev 模式一键启动；`tools/retry_upload.sh`、`tools/make_release.sh`：发布工具链
+- 其余与上游 `test` 完全一致（干净跟随，方便随时合并上游）
+
+---
+
+**以下为上游 README 原文（Alpha 2 发行版的权威使用说明）：**
+
+# Savage Wind Recomp (upstream)
 
 > [!IMPORTANT]
 > **This project is made almost entirely with AI.** Nearly all of the code, tooling, reverse engineering and
