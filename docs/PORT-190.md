@@ -34,10 +34,18 @@ our pipeline currently emits `romfs.bin` — a tree extractor is a B4 task).
 
 ## Milestones
 
-- **B1** version pins: `sw_probe` → `tools/layout.py` build ids. *(done)*
-- **B2** patches re-derivation: Ghidra headless `botw_1900` project, relocate the 44 addresses, port `hle_symbols.txt`.
-- **B3** `make gen` on 1.9.0 exefs → `swgame.dll` builds and loads.
-- **B4** Windows runtime: setup (MSYS2 via `tools/setup_windows.ps1`), romfs tree, first boot.
+- **B1** version pins — **turned out to be a non-issue**: the `test` branch already
+  supports 1.9.0 (`tools/game_sites.py` `Version('1.9.0', 'cd57b23fa4bbad65', True)`,
+  our main module's build id exactly; `layout.py` is fully dynamic; `patches.py` takes
+  per-version sites from `game_sites.py`; `hle_symbols.txt` is a name list resolved
+  through each NSO's dynsym at gen time). The "1.8.2 only" wording is the stale
+  main-branch README. `sw_probe` on our exefs: version 1.9.0, all three modules load,
+  0 unsupported instructions in main/subsdk0, 1 in sdk (`stg` at 0x7002b44050).
+- **B2/B3** (patches/symbols re-derivation) — not needed, see B1.
+- **B4** Windows build & run: `make gen` on our exefs → `swgame.dll`; MSYS2 toolchain
+  via `tools/setup_windows.ps1`; romfs as a directory tree for the runtime setup;
+  first boot. Known 1.9.0 gaps from sw_probe: 53 NVN entry points the runtime does
+  not implement yet (516/569), 1 lifter gap (`stg`).
 
 ## Rules (unchanged from both parent projects)
 
