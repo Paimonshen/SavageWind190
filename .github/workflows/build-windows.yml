@@ -23,10 +23,11 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - name: LF line endings (the bash tools need them; before checkout so the tree is LF)
+        shell: bash
+        run: git config --global core.autocrlf false
 
-      - name: line endings (the bash tools need LF)
-        run: git config core.autocrlf false
+      - uses: actions/checkout@v4
 
       - uses: msys2/setup-msys2@v2
         with:
