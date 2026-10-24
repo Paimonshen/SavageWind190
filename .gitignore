@@ -33,5 +33,10 @@ keys/
 # Ghidra query paths for this machine (tools/ghidra/README.md)
 tools/ghidra/gq.local.json
 
+# extraction front-door (extraction/): fetched hactool source, per-machine outputs
+extraction/work/
+extraction/third_party/hactool/
+deps-win/
+
 # Internal work-branch log, local only
 docs/RAMAS.md
