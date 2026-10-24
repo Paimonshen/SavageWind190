@@ -66,11 +66,11 @@ def main():
                 f.seek(data_base + data_off)
                 left = size
                 while left:
-                    n = f.read(min(left, BUF))
-                    if not n:
+                    chunk = f.read(min(left, BUF))
+                    if not chunk:
                         raise SystemExit(f'short read in image at {data_base + data_off:#x}')
-                    o.write(n)
-                    left -= n
+                    o.write(chunk)
+                    left -= len(chunk)
             nfiles += 1
             nbytes += size
             fo = sib
