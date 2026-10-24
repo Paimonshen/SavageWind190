@@ -14,8 +14,18 @@ mkdir -p "$S"
 JOBS=$(nproc)
 
 fetch() {  # url sha256 file
-    [ -f "$S/$3" ] || curl -fsSL -o "$S/$3.part" "$1" && { [ -f "$S/$3" ] || mv "$S/$3.part" "$S/$3"; }
-    echo "$2  $S/$3" | sha256sum -c --quiet
+    local f="$S/$3"
+    if [ ! -f "$f" ]; then
+        rm -f "$f.part"
+        # ffmpeg.org resets some CI runner IPs; Debian's pool carries the identical
+        # upstream tarball, and the pinned sha256 below proves byte-for-byte equality
+        curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$f.part" "$1" ||
+            curl -fsSL --retry 3 --retry-delay 5 -o "$f.part" \
+                "https://deb.debian.org/debian/pool/main/f/ffmpeg/${3%.tar.xz}.orig.tar.xz" ||
+            true
+        mv "$f.part" "$f" 2>/dev/null || { echo "download failed: $3"; exit 1; }
+    fi
+    echo "$2  $f" | sha256sum -c --quiet
 }
 unpack() { rm -rf "$S/$2" && mkdir -p "$S/$2" && tar -xf "$S/$1" -C "$S/$2" --strip-components 1; }
 

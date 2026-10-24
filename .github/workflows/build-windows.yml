@@ -5,7 +5,6 @@ name: build-windows
 # the LGPL FFmpeg DLLs. No game code and no game files anywhere in this job.
 on:
   push:
-    branches: [port-190]
     tags: ['v*']
   workflow_dispatch:
 
@@ -28,6 +27,15 @@ jobs:
         run: git config --global core.autocrlf false
 
       - uses: actions/checkout@v4
+
+      - name: cache the expensive downloads and builds (zig archive, FFmpeg deps, gen venv)
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/zig-dl
+            build/deps-win
+            build/gen-venv
+          key: dist-deps-win-${{ hashFiles('tools/build_deps_windows.sh', 'tools/fetch_zig.sh', 'tools/swgen.spec') }}
 
       - uses: msys2/setup-msys2@v2
         with:
