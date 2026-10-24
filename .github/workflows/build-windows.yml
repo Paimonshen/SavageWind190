@@ -53,7 +53,10 @@ jobs:
 
       - name: dist
         run: |
-          make gen-helper GEN_PY=python
+          # MSYS2's own python makes a bin/-layout venv; the helper needs the
+          # python.org build from setup-python ($pythonLocation) for its wheels
+          GEN_PY="$(cygpath -u "$pythonLocation")/python.exe"
+          make gen-helper GEN_PY="$GEN_PY"
           bash tools/fetch_zig.sh
           make deps-windows
           make dist RELEASE=1
