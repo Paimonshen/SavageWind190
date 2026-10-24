@@ -40,3 +40,11 @@ deps-win/
 
 # Internal work-branch log, local only
 docs/RAMAS.md
+
+# local run logs and shot artifacts (not tracked)
+*.log
+boot*.log
+game*.err
+game*.log
+sw_*.log
+*.png
