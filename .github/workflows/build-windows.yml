@@ -1,0 +1,75 @@
+name: build-windows
+
+# The self-contained Windows distribution zip, built in the cloud (fast, unthrottled
+# network for the zig download): the release exe, the swgen helper, the slim zig and
+# the LGPL FFmpeg DLLs. No game code and no game files anywhere in this job.
+on:
+  push:
+    branches: [port-190]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write   # tag pushes create the release with the zip
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dist:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: line endings (the bash tools need LF)
+        run: git config core.autocrlf false
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make zip unzip
+            mingw-w64-ucrt-x86_64-clang
+            mingw-w64-ucrt-x86_64-lld
+            mingw-w64-ucrt-x86_64-sdl3
+            mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-vulkan-headers
+            mingw-w64-ucrt-x86_64-vulkan-loader
+            mingw-w64-ucrt-x86_64-shaderc
+            mingw-w64-ucrt-x86_64-spirv-tools
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-vulkan-memory-allocator
+            mingw-w64-ucrt-x86_64-nasm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: dist
+        run: |
+          make gen-helper GEN_PY=python
+          bash tools/fetch_zig.sh
+          make deps-windows
+          make dist RELEASE=1
+
+      - name: upload the zip as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: savagewind-windows-zip
+          path: build/dist/*.zip
+          if-no-files-found: error
+
+      - name: create the release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" (Get-Item 'build/dist/*.zip') `
+            --repo "$env:GITHUB_REPOSITORY" --title "$env:GITHUB_REF_NAME" `
+            --prerelease --generate-notes
