@@ -6,8 +6,8 @@
 # 652e2340f416d0472878ff1b756abc73b4fb9d8d). The Metal backend isn't maintained here (CONTRIBUTING.md).
 # usage: [REF=<commit>] tools/test_translate.sh [count] [jobs] [mode glsl|msl|both]
 # Exits 1 when any job finds differences or compile / validation failures.
-# Needs clang + shaderc + SPIRV-Tools (Windows: MSYS2 ucrt64; macOS: brew install shaderc spirv-tools, or
-# GLSL=0 for the MSL comparison only).
+# Needs clang + shaderc + SPIRV-Tools (Windows: MSYS2 ucrt64; macOS: brew install shaderc spirv-tools; Debian /
+# Ubuntu: libshaderc-dev spirv-tools; or GLSL=0 for the MSL comparison only).
 set -e
 cd "$(dirname "$0")/.."
 COUNT=${1:-20000}
@@ -35,8 +35,16 @@ if [ "$MODE" != glsl ]; then
   DEFS="-DMSL_REF"
 fi
 if [ "${GLSL:-1}" = 1 ]; then
-  $CC -O2 -Wall $DEFS -DWITH_GLSL tools/test_translate.c $OBJS -o "$OUT/test_translate" \
-    -lshaderc_shared -lSPIRV-Tools-shared
+  # shaderc is libshaderc_shared (MSYS2, Arch, from source) or libshaderc (Debian / Ubuntu, Homebrew); SPIRV-Tools is
+  # shared where shipped, static C++ code behind its C API on Debian / Ubuntu (-lstdc++). Each probed with the call
+  # the test makes, shared names first.
+  SHADERC=-lshaderc_shared
+  echo 'extern void *shaderc_compiler_initialize(void); int main(void){return shaderc_compiler_initialize()!=0;}' |
+    $CC -x c - $SHADERC -o "$OUT/probe" 2>/dev/null || SHADERC=-lshaderc
+  SPIRV=-lSPIRV-Tools-shared
+  echo 'extern void *spvContextCreate(int); int main(void){return spvContextCreate(0)!=0;}' |
+    $CC -x c - $SPIRV -o "$OUT/probe" 2>/dev/null || SPIRV="-lSPIRV-Tools -lstdc++"
+  $CC -O2 -Wall $DEFS -DWITH_GLSL tools/test_translate.c $OBJS -o "$OUT/test_translate" $SHADERC $SPIRV
 else
   $CC -O2 -Wall $DEFS tools/test_translate.c $OBJS -o "$OUT/test_translate"
 fi

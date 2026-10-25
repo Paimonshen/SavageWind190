@@ -578,7 +578,9 @@ std::u16string utf16(const char *s) {
             o.push_back((char16_t)(0xD800 + (c >> 10)));
             o.push_back((char16_t)(0xDC00 + (c & 0x3FF)));
         } else {
-            o.push_back((char16_t)c);
+            // (Ё / ё become Е / е, as in the game's own Russian text: its Caption_00 font, the option names', has
+            // no glyph for them and left a gap)
+            o.push_back((char16_t)(c == 0x401 ? 0x415 : c == 0x451 ? 0x435 : c));
         }
     }
     return o;

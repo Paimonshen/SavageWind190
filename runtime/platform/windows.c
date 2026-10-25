@@ -191,10 +191,14 @@ void plat_fatal_notice(void) {
                          "(Windows resets a GPU after 2 seconds) or it ran out of video memory. Lower Video > Upscaler "
                          "quality and Shadow resolution, close other programs and update the driver; on a laptop, run "
                          "Savage Wind on the dedicated GPU.");
-            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
+            } else if (strstr(line, "Vulkan 1.3") || strstr(line, "vkCreateInstance")) {  // (no driver, or too old)
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\nSavage Wind needs a graphics driver with Vulkan 1.3: install the "
                          "latest driver for your GPU (NVIDIA, AMD or Intel).");
+            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {  // (any other driver error)
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nThe graphics driver reported an error. Updating the driver for "
+                         "your GPU may help; if it keeps happening, please report it with the log below.");
             }
         }
     }
