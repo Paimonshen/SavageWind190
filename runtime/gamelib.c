@@ -18,6 +18,59 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
+// ------------------------------------------------------------------ the target (gamelib.h)
+// GAMELIB_ARCH / GAMELIB_ARCH_COMPAT: the -march of each (Makefile GENARCH, GENARCH_COMPAT); GAMELIB_ID_COMPAT only
+// where there is a compatible target.
+#ifndef GAMELIB_ARCH
+#define GAMELIB_ARCH ""
+#endif
+
+// Whether this CPU runs code built for arch: the x86-64 levels the Makefile uses. Another -march (a build's own
+// GENARCH) isn't checked.
+static bool cpu_runs(const char *arch) {
+#if defined(__x86_64__)
+    __builtin_cpu_init();
+    if (strstr(arch, "x86-64-v3"))
+        return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2");
+    if (strstr(arch, "x86-64-v2")) return __builtin_cpu_supports("sse4.2") && __builtin_cpu_supports("popcnt");
+#endif
+    (void)arch;
+    return true;
+}
+
+bool gamelib_compat(void) {
+#ifdef GAMELIB_ID_COMPAT
+    static int compat = -1;
+    if (compat < 0) {
+        const char *e = getenv("SAVAGEWIND_COMPAT_CPU");
+        compat = (e && *e && strcmp(e, "0")) || !cpu_runs(GAMELIB_ARCH);
+    }
+    return compat;
+#else
+    return false;
+#endif
+}
+
+const char *gamelib_id(void) {
+#ifdef GAMELIB_ID_COMPAT
+    if (gamelib_compat()) return GAMELIB_ID_COMPAT;
+#endif
+    return GAMELIB_ID;
+}
+
+const char *gamelib_cpu_problem(void) {
+#ifdef GAMELIB_ID_COMPAT
+    if (!cpu_runs(GAMELIB_ARCH_COMPAT))
+        return "a CPU with SSE4.2 (Intel Nehalem / 2008 or newer, AMD Bulldozer / 2011 or newer)";
+    return NULL;
+#else
+    return cpu_runs(GAMELIB_ARCH) ? NULL
+                                  : "a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer)";
+#endif
+}
+
+// ------------------------------------------------------------------ loading
+
 GameSites g_site;
 const char *g_game_version = "";
 
@@ -46,15 +99,32 @@ static bool take_sites(const GameLibTables *t) {
 }
 
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
-static bool id_matches(const char *lib) {
-    char path[1100], id[128] = {0};
+static bool read_id(const char *lib, char id[128]) {
+    char path[1100];
     snprintf(path, sizeof path, "%s.id", lib);
+    memset(id, 0, 128);
     FILE *f = fopen(path, "rb");
     if (!f) return false;
-    size_t n = fread(id, 1, sizeof id - 1, f);
+    size_t n = fread(id, 1, 127, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    return true;
+}
+
+static bool id_matches(const char *lib) {
+    char id[128];
+    return read_id(lib, id) && !strcmp(id, gamelib_id());
+}
+
+bool gamelib_other_cpu(const char *game_dir) {
+#ifdef GAMELIB_ID_COMPAT
+    char lib[1100], id[128];
+    snprintf(lib, sizeof lib, "%s/%s", game_dir, GAMELIB_NAME);
+    return read_id(lib, id) && !strcmp(id, gamelib_compat() ? GAMELIB_ID : GAMELIB_ID_COMPAT);
+#else
+    (void)game_dir;
+    return false;
+#endif
 }
 
 static bool exists(const char *p) {
@@ -96,7 +166,7 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, GAMELIB_ID)) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, gamelib_id())) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }
@@ -122,6 +192,11 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
             if (g_tables && !take_sites(g_tables)) g_tables = NULL;
             if (g_tables) {
                 LOG("[gamelib] %s (game version %s, %u sites)\n", c[i], g_game_version, *g_tables->nsites);
+#ifdef GAMELIB_ID_COMPAT
+                LOG("[gamelib] target: %s\n", gamelib_compat() ? "compatible (" GAMELIB_ARCH_COMPAT
+                                                                  ", no FMA instructions: slower)"
+                                                                : GAMELIB_ARCH);
+#endif
                 for (uint32_t k = 0; k < *g_tables->nmodules; k++) {
                     const GameLibModule *m = &g_tables->modules[k];
                     LOG("[gamelib]   %-8s %llx-%llx %llu functions\n", m->name, (unsigned long long)m->base,

@@ -17,6 +17,7 @@
 #ifndef GAMELIB_CFLAGS
 #define GAMELIB_CFLAGS "-O1 -fno-strict-aliasing -fvisibility=hidden"
 #endif
+// GAMELIB_CFLAGS_COMPAT: the same for the compatible target (gamelib.h gamelib_compat), where there is one
 #ifndef GAMELIB_ZIGFLAGS  // (zig cc only: what makes it build what clang does with GAMELIB_CFLAGS)
 #define GAMELIB_ZIGFLAGS "-Xclang -O1 -fno-vectorize -fno-slp-vectorize -g0 -fomit-frame-pointer"
 #endif
@@ -254,11 +255,19 @@ static void add_unit(Units *us, const char *src, const char *work, const char *s
     u->bytes = stat(src, &st) == 0 ? (unsigned long long)st.st_size : 0;
 }
 
-// The flags the game code was built with (GAMELIB_CFLAGS, part of its id). zig cc reads -march=<cpu> with its own CPU
-// names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU as -mcpu there.
+// The flags the game code is built with: this CPU's target's (gamelib.h; part of its id). zig cc reads -march=<cpu>
+// with its own CPU names (x86_64_v3) and takes "-<feature>" off the end, so x86-64-v3 would be CPU "x86": the same CPU
+// as -mcpu there.
+static const char *target_cflags(void) {
+#ifdef GAMELIB_CFLAGS_COMPAT
+    if (gamelib_compat()) return GAMELIB_CFLAGS_COMPAT;
+#endif
+    return GAMELIB_CFLAGS;
+}
+
 static void add_cflags(Args *a, const Tools *t) {
     char buf[1024];
-    snprintf(buf, sizeof buf, "%s", GAMELIB_CFLAGS);
+    snprintf(buf, sizeof buf, "%s", target_cflags());
     for (char *f = strtok(buf, " "); f; f = strtok(NULL, " ")) {
         if (t->zig && !strncmp(f, "-march=", 7)) {
             char cpu[128];
@@ -279,7 +288,9 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    char id[128];
+    snprintf(id, sizeof id, "-DGAMELIB_ID=\"%s\"", gamelib_id());
+    add(&a, id);
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -320,6 +331,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
     LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
         t.cc, t.zig ? " cc" : "", o->jobs);
+    LOG("[gamebuild] target%s: %s\n", gamelib_compat() ? " (compatible: no FMA instructions, slower)" : "",
+        target_cflags());
 
     // 1. the modules' layout (tools/layout.py): which modules, at which addresses
     Gen gens[MAX_MODULES];
@@ -529,7 +542,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", gamelib_id()) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }

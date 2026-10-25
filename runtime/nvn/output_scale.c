@@ -10,14 +10,18 @@
 //   MetalFX        (macOS) metal.m has no scene / final split yet: the modes stay greyed there, and MetalFX scales the
 //                  game's image to a bigger window
 //   FSR 3, DLSS    listed as coming later (temporal: they need motion vectors, which the game has none of)
-// The window size itself is Video > Window size (runtime/window_size.c).
+// The window size itself is Video > Window size (runtime/window_size.c). On a window that isn't 16:9, Video > Fill wide
+// screens widens the game's views to it (rt_persp, below) and its 16:9 render targets with them; off, the 16:9 image
+// is fitted into the window with bars. Video > Field of view scales the world's camera in play (rt_persp).
 // Test overrides: SAVAGEWIND_SCALE=<f> (render height = 1080 x f), SAVAGEWIND_WIDE_TEST=<f> (forced shape).
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "../framepace.h"
 #include "../hle.h"
+#include "../platform.h"
 #include "../settings.h"
 #include "output_scale.h"
 
@@ -55,13 +59,20 @@ double upscale_factor(void) {
                ? upscale_mode_factor(g_settings.upscale_quality) : 1.0;
 }
 
+// The window's shape over 16:9 while the game's views are widened to fill it, else 1; the field of view's factor in
+// use (rt_persp)
+static volatile float g_view_shape = 1, g_fov = 1;
+
 void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
     double fit = fmin(dw / 1920.0, dh / 1080.0);
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("SAVAGEWIND_SCALE") ? atof(getenv("SAVAGEWIND_SCALE")) : 0;
     if (wide_test < 0) wide_test = getenv("SAVAGEWIND_WIDE_TEST") ? atof(getenv("SAVAGEWIND_WIDE_TEST")) : 0;
     double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
+    // Wider windows only (a narrower one, 16:10 or 4:3, keeps the 16:9 picture with bars above and below: the HUD's
+    // texture generation doesn't follow a taller view). The start screen and its menus, a 16:9 layout over 16:9
+    // pictures with no world to show more of, keep it too.
+    bool reshape = reshape_allowed && shape > 1.005 && !framepace_title_ui();
     if (!reshape) shape = 1.0;
     // render height in units of the Switch's 1080 lines: the window's (Metal: divided by the upscaler's factor)
 #ifdef __APPLE__
@@ -89,6 +100,93 @@ void output_scale(double dw, double dh, bool reshape_allowed, OutScale *o) {
         o->vw = 1920.0 * wide_test * f2; o->vh = 1080.0 * f2;
     }
     o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
+    o->crop[0] = o->crop[1] = 0, o->crop[2] = o->crop[3] = 1;
+    // The pause menu's pages and the map are 16:9 layouts over the whole picture, their frames drawn for a 16:9 screen:
+    // while one is up the picture's 16:9 middle is shown, with bars, exactly as on a 16:9 screen (the views stay
+    // widened, so nothing is made again; vulkan/exec.c hud_patch stretches their full-width backgrounds to match).
+    if (reshape && wide_test <= 0 && framepace_menu_ui()) {
+        o->crop[0] = (1 - 1 / shape) / 2, o->crop[2] = 1 / shape, o->vw = dw / shape;
+        o->vx = (dw - o->vw) / 2;
+    }
+    g_view_shape = (float)o->shape;
+    // Video > Field of view: in play only (cutscenes and talks keep the game's framing), eased over about 1/4 s so
+    // that a talk's start and end don't jump
+    bool event = framepace_in_event();
+    float want = event ? 1.0f : g_settings.fov / 100.0f;
+    static float logged = -1;
+    static int log = -1;
+    if (log < 0) log = getenv("SAVAGEWIND_LOG_PROJ") != NULL;
+    if (log && want != logged) {
+        logged = want;
+        LOG("[fov] %.2f (setting %d%%, event %d)\n", want, g_settings.fov, (int)event);
+    }
+    static uint64_t last;
+    uint64_t now = plat_now_ns();
+    double dt = last ? (now - last) / 1e9 : 1;
+    last = now;
+    float ease = dt >= 0.25 ? 1.0f : (float)(dt / 0.25);
+    g_fov = fabsf(want - g_fov) < 0.001f ? want : g_fov + (want - g_fov) * ease;
+}
+
+float output_view_shape(void) { return g_view_shape; }
+
+// The game's perspective views, as each one's matrix is built (tools/patches.py _persp_matrix: sead's
+// PerspectiveProjection; tan_fovy = tan(fovy / 2) at +0xac, aspect at +0xb0, as float bits; near at +0x98). Every 16:9
+// view is widened to the window's shape, as every 16:9 render target is (vulkan/textures.c): a wider window sees more
+// to the sides, the vertical view kept. The HUD's and menus' layers are 16:9 views too, so they keep their shape in
+// the middle. The field of view scales the world's
+// camera only: its far plane is 25000 (its near plane moves with the camera's distance), the HUD's layers', the
+// menus' 3D models' and the start screen's are 10000. SAVAGEWIND_LOG_PROJ=1: each kind of view the first time.
+void rt_persp(uint64_t proj, uint32_t *tan_fovy, uint32_t *aspect) {
+    float t, a, nf[2];
+    memcpy(&t, tan_fovy, 4), memcpy(&a, aspect, 4);
+    memcpy(nf, (const void *)(uintptr_t)(proj + 0x98), 8);
+    static int log = -1;
+    if (log < 0) log = getenv("SAVAGEWIND_LOG_PROJ") != NULL;
+    if (log) {  // (by what it is, not where: many are copies on a stack)
+        static float seen[128][4];
+        static int n;
+        float key[4] = {a, t, nf[0], nf[1]};
+        bool known = false;
+        for (int i = 0; i < n && !known; i++) known = !memcmp(seen[i], key, sizeof key);
+        if (!known && n < 128) {
+            memcpy(seen[n++], key, sizeof key);
+            LOG("[proj] %#llx: aspect %.4f, fovy %.2f deg, near %g far %g\n", (unsigned long long)proj, a,
+                2 * atanf(t) * 57.29578f, nf[0], nf[1]);
+        }
+    }
+    if (fabsf(a - 16.0f / 9.0f) >= 0.01f) return;
+    float fov = g_fov, shape = g_view_shape;
+    if (fov != 1 && nf[1] > 10001) t = tanf(fminf(atanf(t) * fov, 1.4f));  // (under 160 degrees)
+    a *= shape;
+    memcpy(tan_fovy, &t, 4), memcpy(aspect, &a, 4);
+}
+
+// The game's frustum views (tools/patches.py _frustum_load: sead's FrustumProjection; left, right at +0xa8 / +0xac,
+// top, bottom at +0xa0 / +0xa4): f = {left, right, top, bottom}, a 16:9 one widened to the window's shape as rt_persp
+// does (some of the HUD's layers are these: the menus' cursor).
+void rt_frustum(uint64_t proj, float *f) {
+    float lr[2], tb[2];
+    memcpy(lr, (const void *)(uintptr_t)(proj + 0xa8), 8);
+    memcpy(tb, (const void *)(uintptr_t)(proj + 0xa0), 8);
+    f[0] = lr[0], f[1] = lr[1], f[2] = tb[0], f[3] = tb[1];
+    float w = lr[1] - lr[0], h = tb[0] - tb[1], shape = g_view_shape;
+    if (shape == 1 || h == 0 || fabsf(fabsf(w / h) - 16.0f / 9.0f) >= 0.01f) return;
+    float c = (lr[0] + lr[1]) / 2;
+    f[0] = c + (lr[0] - c) * shape, f[1] = c + (lr[1] - c) * shape;
+}
+
+// A perspective view's offset (x, y: fractions of its width and height, as float bits; tools/patches.py
+// _persp_matrix_offset), for a view rt_persp widens: the same distance in its 16:9 part (x / shape), so what the game
+// moves to a side lines up with the 16:9 layout around it.
+void rt_persp_offset(uint64_t proj, uint32_t *x, uint32_t *y) {
+    (void)y;
+    float a, ox, shape = g_view_shape;
+    memcpy(&a, (const void *)(uintptr_t)(proj + 0xb0), 4);
+    if (shape == 1 || fabsf(a - 16.0f / 9.0f) >= 0.01f) return;
+    memcpy(&ox, x, 4);
+    ox /= shape;
+    memcpy(x, &ox, 4);
 }
 
 void output_scale_screen(double sw, double sh, int iw, int ih, OutScale *o) {

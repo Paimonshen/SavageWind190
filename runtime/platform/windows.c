@@ -8,6 +8,7 @@
 #include <timeapi.h>
 #include <io.h>
 
+#include "../gamelib.h"
 #include "../platform.h"
 
 // ---- guest address space
@@ -152,13 +153,14 @@ static void log_to_file_without_console(void) {
     _putenv("SAVAGEWIND_LOG_APPEND=1");
 }
 
-// The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
-// with an illegal instruction on an older CPU.
+// The recompiled game code is built for a target this CPU runs (runtime/gamelib.h): say so instead of crashing with an
+// illegal instruction on a CPU too old for any.
 static void require_cpu(void) {
-    __builtin_cpu_init();
-    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
-    MessageBoxA(NULL, "Savage Wind needs a CPU with AVX2 (Intel Haswell / 2013 or newer, AMD Excavator / Zen or newer).",
-                "Savage Wind", MB_ICONERROR | MB_OK);
+    const char *need = gamelib_cpu_problem();
+    if (!need) return;
+    char text[256];
+    snprintf(text, sizeof text, "Savage Wind needs %s.", need);
+    MessageBoxA(NULL, text, "Savage Wind", MB_ICONERROR | MB_OK);
     ExitProcess(1);
 }
 
@@ -183,7 +185,13 @@ void plat_fatal_notice(void) {
             char *end = strchr(line, '\n');
             if (end) *end = 0;
             snprintf(text, sizeof text, "Savage Wind stopped because of an error:\n\n%.600s", line);
-            if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
+            if (strstr(line, "device lost")) {
+                size_t l = strlen(text);
+                snprintf(text + l, sizeof text - l, "\n\nThe graphics driver reset the GPU. Usually a frame took it too long "
+                         "(Windows resets a GPU after 2 seconds) or it ran out of video memory. Lower Video > Upscaler "
+                         "quality and Shadow resolution, close other programs and update the driver; on a laptop, run "
+                         "Savage Wind on the dedicated GPU.");
+            } else if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\nSavage Wind needs a graphics driver with Vulkan 1.3: install the "
                          "latest driver for your GPU (NVIDIA, AMD or Intel).");

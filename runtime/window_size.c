@@ -86,6 +86,12 @@ int winsize_list(WinSize *out, bool fullscreen) {
     }
     if (!have_desk) out[n++] = desk;
     qsort(out, (size_t)n, sizeof *out, cmp);
+    for (int i = 1; i < n; i++)  // (the desktop's own size first)
+        if (same(out[i], desk)) {
+            for (; i > 0; i--) out[i] = out[i - 1];
+            out[0] = desk;
+            break;
+        }
     return n;
 }
 
@@ -120,8 +126,8 @@ static WinSize resolve(WinSize want, bool fullscreen) {
             (best < 0 || list[i].w * list[i].h > list[best].w * list[best].h))
             best = i;
     if (best < 0 && !fullscreen)
-        for (int i = 0; i < n && best < 0; i++)
-            if (group(list[i]) == 0) best = i;
+        for (int i = 0; i < n; i++)
+            if (group(list[i]) == 0 && (best < 0 || list[i].w * list[i].h < list[best].w * list[best].h)) best = i;
     return best >= 0 ? list[best] : winsize_desktop();
 }
 
@@ -131,9 +137,12 @@ WinSize winsize_effective(bool fullscreen) {
 
 WinSize winsize_default(bool fullscreen) { return resolve((WinSize){0, 0}, fullscreen); }
 
-void winsize_name(WinSize s, char *buf, int n) {
+void winsize_name(WinSize s, const char *native, char *buf, int n) {
     const char *a = winsize_aspect(s.w, s.h);
-    if (a) snprintf(buf, (size_t)n, "%d x %d  (%s)", s.w, s.h, a);
+    WinSize d = winsize_desktop();
+    if (!native || !same(s, d)) native = NULL;
+    if (a && native) snprintf(buf, (size_t)n, "%d x %d  (%s, %s)", s.w, s.h, a, native);
+    else if (a || native) snprintf(buf, (size_t)n, "%d x %d  (%s)", s.w, s.h, a ? a : native);
     else snprintf(buf, (size_t)n, "%d x %d", s.w, s.h);
 }
 

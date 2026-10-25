@@ -114,6 +114,7 @@ typedef struct {
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
 } NvnCmdBuf;
+void cmdbuf_pool_gone(uint64_t lo, uint64_t hi);  // a memory pool is finalized: lists recorded in it die
 
 // One recorded command: header, the call's integer and float arguments, then copied data.
 typedef struct {

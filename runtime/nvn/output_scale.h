@@ -7,6 +7,7 @@ typedef struct {
     double scene_sx, scene_sy; // the 3D scene's render targets' scale (vulkan/textures.c RS_SCENE)
     double shape;              // window aspect / 16:9 when the camera is widened, else 1
     double vx, vy, vw, vh;     // where the image is drawn in the window (pixels)
+    double crop[4];            // the part of the image drawn there (uv origin, size): its 16:9 middle in menus
 } OutScale;
 
 // dw x dh: the window's drawable size in pixels

@@ -24,6 +24,10 @@
 //   frame still calls (the composites' material ID, and with it the lighting). Dead blocks are reused three frames later,
 //   not at once: the command buffer that recorded there may still chain on from them. Memory added without a guest
 //   chunk (a null pool) gets shadow storage of its own.
+// - Lists in a memory pool die with it (nvnMemoryPoolFinalize: cmdbuf_pool_gone): on hardware their commands were in
+//   that memory. Without this, every list of every model ever unloaded stayed (issue #74: +6-10k shadows a load).
+// - A shadow's storage starts small and grows a block at a time: the memory the game adds is often far more than it
+//   records there (BOTW adds hundreds of KB where it records a few hundred bytes).
 // A command handle is the host address of a list's first record.
 static uint32_t cmd_cost(uint32_t op, uint32_t extra) { (void)op; return 8 + ((extra + 3) & ~3u); }
 
@@ -42,6 +46,8 @@ static Shadow **g_live;  // shadows of guest memory, sorted by lo, never overlap
 static int g_nlive, g_caplive;
 static HBlock *g_free;   // blocks ready for reuse
 static int g_nfree, g_capfree;
+static uint64_t g_free_bytes;
+#define FREE_BUDGET (64ull << 20)  // dead blocks past this go back to the C heap
 static HBlock *g_grave;  // dead blocks, oldest first, until three frames have passed
 static int g_ngrave, g_capgrave;
 static pthread_mutex_t g_shadow_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -62,13 +68,30 @@ static void block_release(HBlock b) {  // (lock held)
 
 static HBlock block_get(uint64_t want) {  // (lock held) a free block that fits without wasting much, or a new one
     uint64_t now = renderer_present_count();
+    static int stats = -1;
+    static uint64_t stats_at;
+    if (stats < 0) stats = getenv("SAVAGEWIND_CMD_STATS") != NULL;
+    if (stats && now >= stats_at) {  // (test) what the command records hold, every 600 frames
+        uint64_t live = 0;
+        for (int i = 0; i < g_nlive; i++)
+            for (int j = 0; j < g_live[i]->nblocks; j++) live += g_live[i]->blocks[j].size;
+        LOG("[cmdbuf] frame %llu: %d lists' shadows, %llu MB of records; %d free blocks, %llu MB\n",
+            (unsigned long long)now, g_nlive, (unsigned long long)(live >> 20), g_nfree,
+            (unsigned long long)(g_free_bytes >> 20));
+        stats_at = now + 600;
+    }
     int k = 0;
-    while (k < g_ngrave && now - g_grave[k].frame >= 3) push_block(&g_free, &g_nfree, &g_capfree, g_grave[k++]);
+    for (; k < g_ngrave && now - g_grave[k].frame >= 3; k++) {
+        if (g_free_bytes + g_grave[k].size > FREE_BUDGET) { free(g_grave[k].mem); continue; }
+        g_free_bytes += g_grave[k].size;
+        push_block(&g_free, &g_nfree, &g_capfree, g_grave[k]);
+    }
     if (k) memmove(g_grave, g_grave + k, (g_ngrave -= k) * sizeof *g_grave);
     for (int i = g_nfree - 1; i >= 0; i--)
         if (g_free[i].size >= want && g_free[i].size <= want * 4) {
             HBlock b = g_free[i];
             g_free[i] = g_free[--g_nfree];
+            g_free_bytes -= b.size;
             return b;
         }
     want = (want + 0xFF) & ~0xFFull;
@@ -165,6 +188,17 @@ static void shadow_leave(Shadow *sh, uint64_t used) {  // (a command buffer is f
     pthread_mutex_unlock(&g_shadow_lock);
 }
 
+// A memory pool is finalized: the lists recorded in its memory [lo, hi) are dead.
+void cmdbuf_pool_gone(uint64_t lo, uint64_t hi) {
+    pthread_mutex_lock(&g_shadow_lock);
+    int a = live_index(lo), end = a;
+    while (end < g_nlive && g_live[end]->lo < hi) end++;
+    for (int i = a; i < end; i++) shadow_kill(g_live[i]);
+    memmove(g_live + a, g_live + end, (g_nlive - end) * sizeof *g_live);
+    g_nlive -= end - a;
+    pthread_mutex_unlock(&g_shadow_lock);
+}
+
 // Block i of a shadow, at least `want` bytes (blocks past the one in use hold dead records).
 static HBlock shadow_block(Shadow *sh, int i, uint64_t want) {
     pthread_mutex_lock(&g_shadow_lock);
@@ -177,7 +211,8 @@ static HBlock shadow_block(Shadow *sh, int i, uint64_t want) {
             sh->cap = sh->cap ? sh->cap * 2 : 4;
             sh->blocks = realloc(sh->blocks, sh->cap * sizeof *sh->blocks);
         }
-        sh->blocks[sh->nblocks++] = block_get(want);
+        HBlock nb = block_get(want);  // (before the count goes up: the stats line reads the blocks)
+        sh->blocks[sh->nblocks++] = nb;
     }
     HBlock b = sh->blocks[i];
     pthread_mutex_unlock(&g_shadow_lock);
@@ -192,7 +227,7 @@ RT_ON_RESET(cmdbuf_shadow_reset) {  // (reboot: every list is dead; command buff
         free(g_live[i]);
     }
     g_nlive = 0;
-    for (int i = 0; i < g_ngrave; i++) push_block(&g_free, &g_nfree, &g_capfree, g_grave[i]);
+    for (int i = 0; i < g_ngrave; i++) free(g_grave[i].mem);
     g_ngrave = 0;
     pthread_mutex_unlock(&g_shadow_lock);
 }
@@ -240,8 +275,8 @@ static void use_guest_chunk(NvnCmdBuf *cb, uint64_t gmem, uint64_t gsize) {
     cb->gmem = gmem;
     cb->gsize = gsize;
     cb->gused = 0;
-    uint64_t want = gsize * 8;  // (records take several times the GPU bytes; more blocks chain on when needed)
-    use_block(cb, 0, want < 0x400 ? 0x400 : want > 0x100000 ? 0x100000 : want);
+    uint64_t want = gsize * 8;  // (records take several times the GPU bytes; more blocks chain on when needed, each
+    use_block(cb, 0, want < 0x400 ? 0x400 : want > 0x4000 ? 0x4000 : want);  // twice the last: start small)
 }
 
 NVN(nvnCommandBufferAddCommandMemory) {  // (cmd, pool, offset, size)

@@ -797,6 +797,8 @@ void renderer_texture_mark_presented(NvnTexture *t);
 uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 static float pass_sx = 1, pass_sy = 1;
+static bool pass_out;  // the pass draws into the game's final image (RS_OUT: the HUD and menus draw there)
+static bool hud_clip;  // the draw in progress is a 16:9 layout's pane wholly off a 16:9 screen: not drawn (hud_patch)
 static float vp_sx = 1, vp_sy = 1, vp_ox = 0, vp_oy = 0;
 static float tex_sc[2][64][2];
 static uint32_t tex_wh[2][64][2];
@@ -1150,6 +1152,7 @@ static void begin_pass(void) {
     VkAttachmentFeedbackLoopInfoEXT ca_fb[8];
 #endif
     uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;  // w: first attachment seen
+    pass_out = false;
     pass_ncolor = (uint32_t)st.rt.ncolor;
     pass_dbg_n = st.rt.ncolor > 8 ? 8 : st.rt.ncolor;
     for (int i = 0; i < pass_dbg_n; i++) pass_dbg[i] = st.rt.color[i];
@@ -1213,7 +1216,7 @@ static void begin_pass(void) {
                       ? vk_format(st.rt.cview[i].format) : b->format;
         uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
         uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
-        if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
+        if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); pass_out = b->rs_group == RS_OUT; w = ew; }
         if (ew < minw) minw = ew;
         if (eh < minh) minh = eh;
         pass_samples = b->samples;
@@ -1265,6 +1268,18 @@ static VkRect2D scissor_rect(void) {
     pass_size(&w, &h);
     if (!w) return (VkRect2D){{0, 0}, {pass_w, pass_h}};
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
+    // The views widened to a wider window (output_scale.c rt_persp): the HUD's layers are 16:9 views too, so their
+    // content keeps its shape in the middle of the image, narrower than it. A scissor that doesn't span the final
+    // image (the minimap's mask, menus' lists) moves with them.
+    extern float output_view_shape(void);
+    float shape = output_view_shape();
+    if (shape > 1 && pass_out && pass_sx > 0 && sw < 16384) {
+        double gw = w / pass_sx;  // (the target's own width)
+        if (x > 0 || x + sw < gw - 0.5) {
+            double c = gw / 2, x0 = c + (x - c) / shape, x1 = c + (x + sw - c) / shape;
+            x = (int)floor(x0); sw = (int)ceil(x1) - x;
+        }
+    }
     if (vp_sx != 1 || vp_sy != 1 || vp_ox != 0 || vp_oy != 0) {
         double x0 = floor(x * (double)vp_sx + vp_ox), y0 = floor(y * (double)vp_sy + vp_oy);
         double x1 = ceil(((double)x + sw) * vp_sx + vp_ox), y1 = ceil(((double)y + sh) * vp_sy + vp_oy);
@@ -1274,6 +1289,7 @@ static VkRect2D scissor_rect(void) {
         if (y1 > 1e9) y1 = 1e9;
         x = (int)x0; y = (int)y0; sw = (int)(x1 - x0); sh = (int)(y1 - y0);
     }
+    if (hud_clip && pass_out) sw = sh = 0;  // (a pane wholly off a 16:9 screen: see hud_patch)
     if (x < 0) { sw += x; x = 0; }
     if (y < 0) { sh += y; y = 0; }
     if (w > (int)pass_w) w = (int)pass_w;
@@ -1477,11 +1493,13 @@ static VkPipelineLayout make_layout(const VkBindingInfo *binds, int nbinds, VkDe
     return l;
 }
 
+static uint64_t hmix(uint64_t h, const void *p, size_t n);
 static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     if (!getenv("SAVAGEWIND_SAVE_MSL")) return;
     mkdir("build/glsl", 0755);
     char path[256];
-    snprintf(path, sizeof path, "build/glsl/%llx_%s.glsl", (unsigned long long)addr, suffix);
+    uint64_t h = addr ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(addr + 0x30), 0x200) : 0;  // ([draw]'s fs hash)
+    snprintf(path, sizeof path, "build/glsl/%llx_%016llx_%s.glsl", (unsigned long long)addr, (unsigned long long)h, suffix);
     FILE *f = fopen(path, "w");
     if (f) { fputs(src, f); fclose(f); }
 }
@@ -2720,13 +2738,28 @@ static void resolve_feedback(Prog *pr) {
                     stat_feedback_live++;
                     continue;
                 }
-                if (tl > sb) {  // (tl inside the sampled range: keep the levels under it; past it: all of them)
+                // Its sampler, when it is pinned to one level (lod_min == lod_max: BOTW's bloom pyramid reads one level
+                // per pass): the level it reads, in the texture's own numbering.
+                int pinned = -1;
+                {
+                    int slot = ((int)infos[sg]->tex[i].handle_offset - 0x20) / 8;
+                    uint64_t h = slot >= 0 && slot < 32 ? st.tex[sg][slot] : 0;
+                    uint32_t tsc = (uint32_t)(h >> 20) & 0xFFF;
+                    const NvnSamplerDesc *sd =
+                        h && st.spool && tsc < (uint32_t)st.spool->count ? &((NvnSamplerDesc *)st.spool->entries)[tsc] : NULL;
+                    if (sd && sd->lod_min >= 0 && sd->lod_max - sd->lod_min < 0.5f) pinned = (int)sb + (int)sd->lod_min;
+                }
+                if (tl > sb || (pinned > (int)tl && pinned < (int)(sb + sn))) {
                     NvnTextureView v;
                     memset(&v, 0, sizeof v);
                     if (e && e->has_view) v = e->view;
                     v.setmask |= 1;
-                    v.base_level = (uint8_t)sb;
-                    v.num_levels = (uint8_t)(tl < sb + sn ? tl - sb : sn);
+                    // Going back up the chain, it writes level n from a smaller level k > n (the pyramid's upsample
+                    // passes add level 2 into 1, ...): the levels under n don't hold k, and the lookup clamped to level
+                    // 0, the unblurred image (the bloom showed blocky, a sharp low-resolution glow stretched over the
+                    // screen). A view of level k alone: the pinned lod clamps to its one level.
+                    if (pinned > (int)tl) v.base_level = (uint8_t)pinned, v.num_levels = 1;
+                    else v.base_level = (uint8_t)sb, v.num_levels = (uint8_t)(tl < sb + sn ? tl - sb : sn);
                     VkImageView view = vk_view(t, &v, true, false, infos[sg]->tex[i].type);
                     if (view) {
                         stat_feedback_live++;
@@ -2901,6 +2934,61 @@ static bool sdw_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out)
     return m->found;
 }
 
+// The views widened to the window (output_scale.c rt_persp), in draws into the final image (RS_OUT) whose vertex
+// constant buffer c3 starts with a symmetric perspective matrix (the HUD's and menus' layers: nn::ui2d's vertex block,
+// the matrix in c3[0-3], the view in c3[4-6], the pane's rectangle - width, height, left, top - in c3[33]):
+// - a layer whose matrix the game made without sead's projection classes (the menus' selection cursor) still projects
+//   16:9, and its pieces landed where the unwidened view puts them: it gets the widened matrix;
+// - a pane that covers the layer's whole 16:9 width (a fade, a loading screen's black, the menus' blurred picture of
+//   the game - a picture of the wider scene) covered only the middle of the wider picture: it gets the 16:9 matrix,
+//   which stretches it over the whole window. (The start screen is shown 16:9 with bars: output_scale.c.)
+// In a copy of the buffer, as rt_persp makes them: m00 / shape on a wider window, m11 x shape on a narrower one.
+// - a pane wholly past the edges (a layout's parts kept off screen: a pane with a texture nothing draws into, at the
+//   inventory's description box) is not drawn (hud_clip, scissor_rect), as it is never seen on the console.
+// SAVAGEWIND_NO_HUD_FIX=1: off.
+static bool hud_patch(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
+    static int off = -1;
+    if (off < 0) off = getenv("SAVAGEWIND_NO_HUD_FIX") != NULL;
+    extern float output_view_shape(void);
+    float shape = output_view_shape();
+    if (off || shape <= 1 || size < 64 || !st.rt.ncolor || !st.rt.color[0]) return false;
+    TexBackend *tb = (TexBackend *)st.rt.color[0]->backend;
+    if (!tb || tb->rs_group != RS_OUT) return false;
+    const float *g = (const float *)(uintptr_t)addr;
+    if (!(g[0] > 0 && g[5] > 0 && g[14] == -1 && !g[1] && !g[2] && !g[3] && !g[4] && !g[6] && !g[7] && !g[8] && !g[9] &&
+          !g[12] && !g[13] && !g[15]))
+        return false;
+    float ratio = g[5] / g[0], flat = 16.0f / 9.0f, wide = flat * shape;
+    bool is_flat = fabsf(ratio - flat) < 0.002f, is_wide = fabsf(ratio - wide) < 0.002f * shape;
+    if (!is_flat && !is_wide) return false;
+    float m00 = is_flat ? g[0] / shape : g[0];  // the widened matrix's
+    // a 40-degree HUD layer's pane over the whole 16:9 width -> the 16:9 matrix
+    if (size >= 34 * 16 && fabsf(g[5] - 2.74748f) < 0.001f) {
+        const float *mv = g + 16, *rc = g + 33 * 4;  // (view rows 4-6, rectangle)
+        if (rc[0] > 0 && rc[1] > 0) {
+            float lo[1] = {1e9f}, hi[1] = {-1e9f};
+            for (int k = 0; k < 4; k++) {
+                float x = (k & 1) * rc[0] + rc[2], y = rc[3] - (k >> 1) * rc[1];
+                float vx = mv[0] * x + mv[1] * y + mv[3], vz = mv[8] * x + mv[9] * y + mv[11];
+                float w = -vz;  // (row 3 of the matrix: 0 0 -1 0)
+                if (w <= 0) { lo[0] = 1e9f; break; }
+                float nx = m00 * vx / w;
+                if (nx < lo[0]) lo[0] = nx;
+                if (nx > hi[0]) hi[0] = nx;
+            }
+            if (lo[0] <= -1 / shape + 0.01f && hi[0] >= 1 / shape - 0.01f) m00 *= shape;
+            if (lo[0] < 1e8f && (hi[0] <= -1 / shape || lo[0] >= 1 / shape)) hud_clip = true;  // (wholly off a 16:9 screen)
+        }
+    }
+    if (m00 == g[0]) return false;
+    static float buf[0x10000 / 4];
+    uint64_t n = size > sizeof buf ? sizeof buf : size;
+    memcpy(buf, g, n);
+    buf[0] = m00;
+    *out = ubo_span(vk_transient_copy(buf, n, 256), n);
+    return true;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
@@ -2943,6 +3031,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     VkDescriptorBufferInfo direct;
     if (gw_ubo_direct(r.addr, size, &direct)) return direct;  // (written by a storing shader: read in place, see gw_note)
     if (stage == 1 && sdw_fix.s > 1 && sdw_patch(r.addr, size, &direct)) return direct;  // (texel size: see sdw_fix)
+    if (stage == 0 && k == 3 && hud_patch(r.addr, size, &direct)) return direct;  // (a 16:9 HUD layer: see hud_patch)
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
@@ -4506,6 +4595,7 @@ have_pipe:
     PROFD_T0();
     uint32_t dyn[64];
     int ndyn = 0;
+    hud_clip = false;  // (hud_patch, while the vertex stage's constant buffers are bound)
     VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
     PROFD_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];

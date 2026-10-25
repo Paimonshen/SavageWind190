@@ -33,6 +33,7 @@
 #include "../../third_party/imgui/imstb_truetype.h"
 
 #define FMT_BC4 0x49
+#define FMT_R8 0x01
 #define CELL 50
 
 // The game's sheet: 256x1024 BC4, 5 x 20 cells of 50x50 (51 apart). nn::font copies it into a texture memory pool of
@@ -659,5 +660,68 @@ bool glyphs_apply(uint64_t addr, uint64_t pool_lo, uint64_t pool_hi, uint32_t fo
     }
     free(orig);
     free(img);
+    return true;
+}
+
+// Some prompts are not text: the HUD draws them with textures of its own layouts (Layout/Common.sblarc): the action
+// button ("Pick up", "Talk"...), the paraglider's button with its diamond of the others, the d-pad of the quick menus.
+// R8 coverage masks, a button glyph each, recognised by size and contents (as uploaded, deswizzled).
+typedef struct { uint16_t w, h; uint64_t hash; int code; } LayoutIcon;
+static const LayoutIcon k_layout_icons[] = {
+    {48, 48, 0x3cf281fb77fe6e1full, 0xE040},  // Nt_KeyTexA_00
+    {48, 48, 0x5c11641d8572ef3eull, 0xE041},  // Nt_KeyTexB_00
+    {48, 48, 0x80ac73dec7998dc2ull, 0xE042},  // Nt_KeyTexX_00
+    {48, 48, 0x4d2a26b5991ee454ull, 0xE043},  // Nt_KeyTexY_00
+    {48, 48, 0x01ba4a1c31788ef6ull, 0xE044},  // Nt_KeyTexL_00
+    {48, 48, 0xc85329ba2d18b0cbull, 0xE046},  // Nt_KeyTexZL_00
+    {48, 48, 0xc3719621a38a3959ull, 0xE05E},  // Nt_KeyTexLSt_01: the left stick
+    {48, 48, 0x0d90f7505ab43e59ull, 0xE052},  // Nt_KeyTexLSt_00: the left stick, up
+    {46, 46, 0xde6c79012595283cull, 0xE049},  // ButtonIcon46_00: the d-pad
+    {64, 64, 0xc171fee97aa2e0b1ull, 0xE049},  // ButtonIconL46NN_00: the d-pad (the shortcuts at the top left)
+};
+
+bool glyphs_apply_layout(uint32_t format, uint32_t w, uint32_t h, uint8_t *lin, uint32_t row) {
+    if (format != FMT_R8 || w > 2 * CELL || h > 2 * CELL || row < w) return false;
+    const LayoutIcon *li = NULL;
+    for (size_t i = 0; i < sizeof k_layout_icons / sizeof *k_layout_icons && !li; i++)
+        if (k_layout_icons[i].w == w && k_layout_icons[i].h == h) {
+            uint64_t hash = 0xcbf29ce484222325ull;
+            for (uint32_t y = 0; y < h; y++)
+                for (uint32_t x = 0; x < w; x++) hash = (hash ^ lin[(uint64_t)y * row + x]) * 0x100000001b3ull;
+            for (size_t k = i; k < sizeof k_layout_icons / sizeof *k_layout_icons; k++)
+                if (k_layout_icons[k].w == w && k_layout_icons[k].h == h && k_layout_icons[k].hash == hash) li = &k_layout_icons[k];
+            break;
+        }
+    if (!li) return false;
+    // the icon's box (its lit pixels), in a cell canvas with the texture centred in it (scaled down to fit)
+    float k = w > CELL || h > CELL ? (float)CELL / (float)(w > h ? w : h) : 1;
+    float ox = (CELL - w * k) / 2, oy = (CELL - h * k) / 2;
+    int bx0 = (int)w, by0 = (int)h, bx1 = -1, by1 = -1;
+    for (int y = 0; y < (int)h; y++)
+        for (int x = 0; x < (int)w; x++)
+            if (lin[(uint64_t)y * row + x] > 96) {
+                if (x < bx0) bx0 = x;
+                if (x > bx1) bx1 = x;
+                if (y < by0) by0 = y;
+                if (y > by1) by1 = y;
+            }
+    if (bx1 < 0) return true;
+    Box b = {ox + (bx0 + bx1 + 1) * k / 2, oy + (by0 + by1 + 1) * k / 2, (by1 - by0 + 1) * k, (bx1 - bx0 + 1) * k};
+    static Canvas cv;
+    memset(&cv, 0, sizeof cv);
+    int kind = resolve_kind(), copy = 0;
+    bool drawn = draw_glyph(&cv, b, li->code, kind, &copy);  // (Nintendo: the game's own, even with other bindings)
+    if (drawn)
+        for (int y = 0; y < (int)h; y++)
+            for (int x = 0; x < (int)w; x++) {  // (bilinear from the canvas)
+                float fx = clampf(ox + (x + 0.5f) * k - 0.5f, 0, CELL - 1), fy = clampf(oy + (y + 0.5f) * k - 0.5f, 0, CELL - 1);
+                int x0 = (int)fx, y0 = (int)fy, x1 = x0 + 1 < CELL ? x0 + 1 : x0, y1 = y0 + 1 < CELL ? y0 + 1 : y0;
+                float tx = fx - x0, ty = fy - y0;
+                float a = (cv.a[y0 * CELL + x0] * (1 - tx) + cv.a[y0 * CELL + x1] * tx) * (1 - ty) +
+                          (cv.a[y1 * CELL + x0] * (1 - tx) + cv.a[y1 * CELL + x1] * tx) * ty;
+                lin[(uint64_t)y * row + x] = (uint8_t)lroundf(a * 255);
+            }
+    static int nlog;
+    if (nlog++ < 16) LOG("[glyphs] layout icon %04X (%ux%u): %s icons%s\n", li->code, w, h, k_kind_names[kind], drawn ? "" : ", kept");
     return true;
 }

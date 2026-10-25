@@ -1,8 +1,8 @@
 #!/bin/bash
-# usage: tools/zig_slim.sh <game code flags>: the Windows release's compiler, build/zig-slim/ (shipped as zig/), made
-# from tools/fetch_zig.sh's build/zig/. The full zig compiles the MinGW C runtime and its own runtime library from
-# ~4000 source files on the player's machine at the first link; here they are built once, ahead of time, and only
-# what building the game code reads is kept:
+# usage: tools/zig_slim.sh <game code flags> [-- <the compatible target's game code flags>]: the Windows release's
+# compiler, build/zig-slim/ (shipped as zig/), made from tools/fetch_zig.sh's build/zig/. The full zig compiles the
+# MinGW C runtime and its own runtime library from ~4000 source files on the player's machine at the first link; here
+# they are built once, ahead of time, and only what building the game code reads is kept:
 #   zig.exe, lib/std/std.zig (how zig finds its lib folder), the headers the game code includes (from the compiler's
 #   dependency lists of a probe), rt/ = the runtime libraries a `zig cc -shared` link uses and rt/link.rsp = that
 #   link's flags and libraries (runtime/gamebuild.c links with `zig lld-link @rt/link.rsp -LIBPATH:rt`).
@@ -16,9 +16,11 @@ mkdir -p $W/cache $O/lib/std $O/rt
 export ZIG_GLOBAL_CACHE_DIR="$(cygpath -w "$PWD/$W/cache")" ZIG_LOCAL_CACHE_DIR="$(cygpath -w "$PWD/$W/cache")"
 mkdir -p $W/tmp
 export TMPDIR="$(cygpath -w "$PWD/$W/tmp")" TMP="$(cygpath -w "$PWD/$W/tmp")" TEMP="$(cygpath -w "$PWD/$W/tmp")"  # (MSYS's /c/... TMPDIR: not for zig)
-flags=()  # (the game code's flags as gamebuild.c add_cflags passes them to zig)
+flags=() flags2=()  # (the game code's flags as gamebuild.c add_cflags passes them to zig; flags2: the compatible
+set=1                #  target's, when given)
 for f in "$@"; do
-    case $f in -march=*) c=${f#-march=}; flags+=("-mcpu=${c//-/_}") ;; *) flags+=("$f") ;; esac
+    case $f in --) set=2; continue ;; -march=*) c=${f#-march=}; f="-mcpu=${c//-/_}" ;; esac
+    if [ $set = 1 ]; then flags+=("$f"); else flags2+=("$f"); fi
 done
 
 # 1. the headers: what the generated C (cpu.h, simd.h; setjmp.h where it calls the guest setjmp: tools/gen.py
@@ -26,8 +28,11 @@ done
 printf '#include "cpu.h"\n#include "simd.h"\n#include <setjmp.h>\n' > $W/probe.c
 $Z/zig.exe cc "${flags[@]}" -Iruntime -c $W/probe.c -o $W/probe.o -MD -MF $W/probe.d
 $Z/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' -c tools/gamelib_entry.c -o $W/entry.o -MD -MF $W/entry.d
+: > $W/probe2.d
+[ ${#flags2[@]} = 0 ] ||
+    $Z/zig.exe cc "${flags2[@]}" -Iruntime -c $W/probe.c -o $W/probe2.o -MD -MF $W/probe2.d
 n=0
-for h in $(cat $W/probe.d $W/entry.d | tr ' ' '\n' | tr -d '\r' | sed -n 's|^build/zig/lib/|lib/|p' | sort -u); do
+for h in $(cat $W/probe.d $W/probe2.d $W/entry.d | tr ' ' '\n' | tr -d '\r' | sed -n 's|^build/zig/lib/|lib/|p' | sort -u); do
     mkdir -p "$O/$(dirname "$h")"
     cp "$Z/$h" "$O/$h"
     n=$((n + 1))
@@ -35,12 +40,14 @@ done
 cp $Z/zig.exe $Z/LICENSE $O/
 cp $Z/lib/std/std.zig $O/lib/std/
 
-# 2. the runtime: a probe DLL importing from the exe, linked the way the full zig does it (-v: its lld-link line)
+# 2. the runtime: a probe DLL importing from the exe, linked the way the full zig does it (-v: its lld-link line).
+#    For the baseline x86-64 CPU: zig cc's own default is this machine's CPU, and the runtime libraries it builds are
+#    linked into every player's game code - built on a recent CPU, they hold thousands of AVX / BMI2 instructions.
 printf 'LIBRARY savagewind.exe\nEXPORTS\nprobe_host\n' > $W/host.def
 printf '#include <setjmp.h>\nvoid probe_host(void);\nstatic jmp_buf jb;\n__declspec(dllexport) void probe(void) { if (!setjmp(jb)) probe_host(); }\n' > $W/dll.c
 ZA=$PWD/$Z/zig.exe
 (cd $W && $ZA dlltool -d host.def -l host.a -m i386:x86-64 && $ZA cc "${flags[@]}" -c dll.c -o dll.o &&
-    $ZA cc -shared -o probe.dll dll.o host.a -v 2> link.log) || { echo "tools/zig_slim.sh: probe link failed ($W/link.log)"; exit 1; }
+    $ZA cc -mcpu=x86_64 -shared -o probe.dll dll.o host.a -v 2> link.log) || { echo "tools/zig_slim.sh: probe link failed ($W/link.log)"; exit 1; }
 line=$(grep '^lld-link ' $W/link.log | tail -1 | tr -d '\r')
 [ -n "$line" ] || { echo "tools/zig_slim.sh: no lld-link line in $W/link.log"; exit 1; }
 : > $O/rt/link.rsp
@@ -64,6 +71,7 @@ echo "-NOIMPLIB" >> $O/rt/link.rsp
 rm -rf $W/cache2
 export ZIG_GLOBAL_CACHE_DIR="$(cygpath -w "$PWD/$W/cache2")" ZIG_LOCAL_CACHE_DIR="$(cygpath -w "$PWD/$W/cache2")"
 $O/zig.exe cc "${flags[@]}" -Iruntime -c $W/probe.c -o $W/probe2.o
+[ ${#flags2[@]} = 0 ] || $O/zig.exe cc "${flags2[@]}" -Iruntime -c $W/probe.c -o $W/probe3.o  # (compatible)
 $O/zig.exe cc "${flags[@]}" -Iruntime '-DGAMELIB_ID="0"' -c tools/gamelib_entry.c -o $W/entry2.o
 (cd $W && "$OA/zig.exe" lld-link "@$(cygpath -w "$OA/rt/link.rsp")" "-LIBPATH:$(cygpath -w "$OA/rt")" \
     -OUT:probe2.dll dll.o host.a) || { echo "tools/zig_slim.sh: the slim zig's link failed"; exit 1; }

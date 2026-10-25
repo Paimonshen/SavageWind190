@@ -101,6 +101,9 @@ static struct {
     bool started;           // its orientation was set from gravity (first accelerometer reading)
     Quat q;                 // its orientation
     double bias[3];         // its gyroscope at rest (rad/s, Switch axes)
+    double mean[3], var[3]; // its gyroscope's recent mean and variance (rad/s, (rad/s)^2; ~0.2 s)
+    double acc_mean, acc_var;  // its accelerometer's recent strength, mean and variance (G, G^2; ~0.2 s)
+    double gyro_sd;         // (the log: the gyroscope's spread just now, rad/s)
     double acc[3];          // last accelerometer reading (G, gravity's direction, Switch axes)
     double lin[3];          // ... beyond gravity
     uint64_t gyro_ts;       // last gyroscope reading's sensor time (ns)
@@ -118,6 +121,9 @@ void motion_pad_opened(SDL_Gamepad *pad) {
     pthread_mutex_lock(&g_lock);
     g.sensors = on, g.started = false, g.gyro_ts = 0;
     memset(g.bias, 0, sizeof g.bias);
+    memset(g.mean, 0, sizeof g.mean);
+    memset(g.var, 0, sizeof g.var);
+    g.acc_mean = 1, g.acc_var = 0;
     memset(g.lin, 0, sizeof g.lin);
     pthread_mutex_unlock(&g_lock);
     if (on)
@@ -135,13 +141,36 @@ void motion_pad_closed(void) {
 }
 
 // One gyroscope reading (rad/s, Switch axes) over dt seconds: learn its bias at rest, pull the tilt toward gravity,
-// turn the orientation
+// turn the orientation.
+// At rest a gyroscope reads its bias, not 0 (a few degrees per second on many controllers), and nothing corrects the
+// yaw (gravity only levels the tilt): an unlearnt bias turns the aim on its own. Lying still (only the sensor's noise
+// left over ~0.2 s) the reading is the bias, whatever its size: learnt within a quarter second. Held still in the
+// hands (a steady reading close to the bias) it is refined slowly, so a slow steady turn isn't taken for bias. (It
+// was only learnt in the second case, from 0: a bias above ~3 degrees/s never was, and the aim drifted.)
 static void fuse_gyro(const double raw[3], double dt) {
     double an = sqrt(g.acc[0] * g.acc[0] + g.acc[1] * g.acc[1] + g.acc[2] * g.acc[2]);
-    double r[3] = {raw[0] - g.bias[0], raw[1] - g.bias[1], raw[2] - g.bias[2]};
-    if (sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) < 0.05 && fabs(an - 1) < 0.05) {  // (still: ~3 degrees/s)
-        double k = dt / 4.0;
-        for (int i = 0; i < 3; i++) g.bias[i] += (raw[i] - g.bias[i]) * k;
+    double ka = dt / 0.2 > 1 ? 1 : dt / 0.2, sd = 0;
+    for (int i = 0; i < 3; i++) {
+        double d = raw[i] - g.mean[i];
+        g.mean[i] += d * ka;
+        g.var[i] += (d * d - g.var[i]) * ka;
+        sd = fmax(sd, sqrt(g.var[i]));
+    }
+    double ad = an - g.acc_mean;  // (the accelerometer: steady, and about gravity's strength - many read a few % off)
+    g.acc_mean += ad * ka;
+    g.acc_var += (ad * ad - g.acc_var) * ka;
+    g.gyro_sd = sd;
+    bool only_gravity = sqrt(g.acc_var) < 0.01 && fabs(an - 1) < 0.15;
+    double off = sqrt((g.mean[0] - g.bias[0]) * (g.mean[0] - g.bias[0]) + (g.mean[1] - g.bias[1]) * (g.mean[1] - g.bias[1]) +
+                      (g.mean[2] - g.bias[2]) * (g.mean[2] - g.bias[2]));
+    double tau = 0;
+    if (only_gravity) {
+        if (sd < 0.006) tau = 0.25;                   // lying still: the sensor's noise only
+        else if (sd < 0.02 && off < 0.05) tau = 4.0;  // held still, near the bias (~3 degrees/s)
+    }
+    if (tau > 0) {
+        double k = dt / tau > 1 ? 1 : dt / tau;
+        for (int i = 0; i < 3; i++) g.bias[i] += (g.mean[i] - g.bias[i]) * k;
     }
     double w[3] = {raw[0] - g.bias[0], raw[1] - g.bias[1], raw[2] - g.bias[2]};
     Mat m;
@@ -342,9 +371,11 @@ static void update(uint64_t now) {
         s.logged = now;
         const SixAxisState *st = &s.ring[s.head];
         LOG("[motion] %s: yaw %.1f pitch %.1f roll %.1f deg | gyro %.3f %.3f %.3f turns/s | acc %.2f %.2f %.2f G | "
-            "sample %lld\n", kind ? "sensors" : g.tilt_held || g.tilt_pitch || g.tilt_roll ? "mouse tilt" : "still/script",
+            "bias %.2f %.2f %.2f deg/s (spread %.4f rad/s, %.4f G) | sample %lld\n",
+            kind ? "sensors" : g.tilt_held || g.tilt_pitch || g.tilt_roll ? "mouse tilt" : "still/script",
             s.yaw * 180 / PI, s.pitch * 180 / PI, s.roll * 180 / PI, st->gyro[0], st->gyro[1], st->gyro[2], st->acc[0],
-            st->acc[1], st->acc[2], (long long)st->sampling_number);
+            st->acc[1], st->acc[2], g.bias[0] * 180 / PI, g.bias[1] * 180 / PI, g.bias[2] * 180 / PI, g.gyro_sd,
+            sqrt(g.acc_var), (long long)st->sampling_number);
     }
 }
 

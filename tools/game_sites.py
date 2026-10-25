@@ -109,6 +109,23 @@ SITES = [
     Site('frame_loop_interval_ret', 'code', 'f9400268 aa1303e0 f9409908 d63f0100 14000000/fc000000 1100052a '
          '14000000/fc000000 2a0903e1', 4),
     Site('vfr_ratio', 'code', 'b9407a68 7100051f 5400000b/ff00001f 2a1f03f4 f9404269 6b14011f 1a9f8288 bd403e60', 0),
+    # the menus' speed (tools/patches.py _gui_speed): the frame interval x 0.5 stored as the GUI speed
+    # perspective projections' matrix (tools/patches.py _persp_matrix): the load of tan(fovy / 2) and the aspect ratio
+    Site('persp_matrix', 'code', 'bd409800 1e2c1003 52b7f008 2d558801 1e202800 2d569404', 3),
+    Site('persp_matrix_offset', 'code', 'bd409800 1e2c1003 52b7f008 2d558801 1e202800 2d569404', 5),
+    # frustum projections' matrix (tools/patches.py _frustum_matrix): its four loads of left / right and top / bottom
+    Site('frustum_lr0', 'code', '2d550001 52b7f008 bd409802 b900043f 1e213800 1e2e1001 1e222842 1e201820', 0),
+    Site('frustum_lr1', 'code', '2d550001 52b7f008 bd409802 b900043f 1e213800 1e2e1001 1e222842 1e201820', 10),
+    Site('frustum_tb0', 'code', '2d550001 52b7f008 bd409802 b900043f 1e213800 1e2e1001 1e222842 1e201820', 15),
+    Site('frustum_tb1', 'code', '2d550001 52b7f008 bd409802 b900043f 1e213800 1e2e1001 1e222842 1e201820', 23),
+    # projections' update (tools/patches.py _proj_update): the load of the matrix's dirty flag
+    Site('proj_update', 'code', '39402008 aa0003f3 34000268 f9400268 91003261 aa1303e0 f9402d08 d63f0100', 0),
+    # perspective projections' screen position to camera position (tools/patches.py _persp_unproject): the loads of
+    # tan(fovy / 2) (y) and of it with the aspect ratio (x)
+    Site('persp_unproject_y', 'code', 'bd409800 f900003f 1e201004 1e214000 bd000820 bd409800 bd40ac01 bd400442', 6),
+    Site('persp_unproject_x', 'code', 'bd409800 f900003f 1e201004 1e214000 bd000820 bd409800 bd40ac01 bd400442', 18),
+    Site('gui_speed', 'code', 'bd0b2100 94000000/fc000000 f9400260 94000000/fc000000 52800020 94000000/fc000000 '
+         'a9414ff4 a8c27bfd', 0),
     Site('pause_state', 'ref', '90000013/9f00001f b9400268/ffc003ff 35000008/ff00001f 90000008/9f00001f '
          'b9400108/ffc003ff 35000008/ff00001f b9400268/ffc003ff 34000008/ff00001f', 1),
     Site('event_mgr', 'ref', '9000000d/9f00001f 910001ad/ffc003ff f94001a0 aa1703e1 94000000/fc000000 aa1703e0 '
@@ -157,6 +174,16 @@ KNOWN = {
         'frame_wait': 0x7000d811fc,
         'frame_loop_interval_ret': 0x7001012a34,
         'vfr_ratio': 0x70014092f4,
+        'gui_speed': 0x700116d0e8,
+        'persp_matrix': 0x7000da1400,
+        'persp_matrix_offset': 0x7000da1408,
+        'persp_unproject_y': 0x7000da14d8,
+        'proj_update': 0x7000da0e24,
+        'frustum_lr0': 0x7000da18d4,
+        'frustum_lr1': 0x7000da18fc,
+        'frustum_tb0': 0x7000da1910,
+        'frustum_tb1': 0x7000da1930,
+        'persp_unproject_x': 0x7000da1508,
         'pause_state': 0x7001cb48a4,
         'event_mgr': 0x7001cd8db8,
         'controller_step': 0x7001c4ba40,
@@ -197,6 +224,16 @@ KNOWN = {
         'frame_wait': 0x7000e9487c,
         'frame_loop_interval_ret': 0x70011267c4,
         'vfr_ratio': 0x700151d494,
+        'gui_speed': 0x7001280ee8,
+        'persp_matrix': 0x7000eb4a50,
+        'persp_matrix_offset': 0x7000eb4a58,
+        'persp_unproject_y': 0x7000eb4b28,
+        'proj_update': 0x7000eb4474,
+        'frustum_lr0': 0x7000eb4f24,
+        'frustum_lr1': 0x7000eb4f4c,
+        'frustum_tb0': 0x7000eb4f60,
+        'frustum_tb1': 0x7000eb4f80,
+        'persp_unproject_x': 0x7000eb4b58,
         'pause_state': 0x7001e1611c,
         'event_mgr': 0x7001e3a638,
         'controller_step': 0x7001dad0e0,

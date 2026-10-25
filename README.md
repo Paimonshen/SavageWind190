@@ -105,27 +105,40 @@ mouse, and its text and voices in any of its languages.
 > Savage Wind never decrypts anything: it only reads files you have already extracted yourself. The recompilation of
 > the game code happens locally, on your machine, from your files.
 
-## Getting started (Alpha 2, Windows)
+## Getting started (Alpha 3)
 
-1. Download `SavageWind-0.2.0-alpha.2-windows.zip` from [Releases](https://github.com/Revivedx/SavageWindRecomp/releases)
-   and extract it to a folder you can write to (not Program Files): your game files, saves and settings are kept in
-   that folder.
-2. Run `savagewind.exe`. The first time it asks for your game files: pick the folder with your own extracted game
-   (`exefs/` and `romfs/`, version 1.9.0, see below) and choose **Set up game files**. It checks the
-   version, copies the files, builds the data image and recompiles the game code on your machine - once, and it takes
-   a while (about 40 minutes with a 12-thread CPU). Your own files aren't changed. When it's done the game starts.
-3. From then on `savagewind.exe` goes straight into the game. The settings, including the text and voice languages,
+1. Download from [Releases](https://github.com/Revivedx/SavageWindRecomp/releases):
+   - **Windows:** `SavageWind-0.3.0-alpha.3-windows.zip`. Extract it to a folder you can write to (not Program
+     Files): your game files, saves and settings are kept in that folder.
+   - **Linux (x86-64, Steam Deck too):** `Savage_Wind-0.3.0-alpha.3-x86_64.AppImage`. Make it executable
+     (`chmod +x`) and run it; your game files, saves and settings go to `~/.local/share/savagewind`. See
+     [docs/linux.md](docs/linux.md).
+   - **Linux on ARM (aarch64):** `Savage_Wind-0.3.0-alpha.3-aarch64.AppImage` is **highly experimental**: it has
+     never run on real ARM hardware. Reports from real hardware are welcome ([docs/linux.md](docs/linux.md),
+     "Testing on ARM").
+2. Run `savagewind.exe` (or the AppImage). The first time it asks for your game files: pick the folder with your own
+   extracted game (`exefs/` and `romfs/`, version 1.9.0, see below) and choose **Set up game files**. It checks the
+   version, copies the files, builds the data image and recompiles the game code on your machine - once (about 6
+   minutes for the game code with a 12-thread CPU, plus the copy and the optional shader precompilation). Your own
+   files aren't changed. When it's done the game starts.
+3. From then on Savage Wind goes straight into the game. The settings, including the text and voice languages,
    are in the game's Options (pause menu > System > Options, or Options on the title screen).
-4. **Savage Wind Configuration** (`Savage Wind Configuration.exe`, in the same folder) opens the configuration
-   screen: Play, Settings, your game files (set them up again, rebuild the game code, delete them) and Quit. In
-   game, Quit to Start Screen also comes back to it. (Built from source on Linux or macOS: `--config`, the
-   AppImage's **Savage Wind Configuration** desktop action, or Option held while opening the Mac app.)
+4. **Savage Wind Configuration** (`Savage Wind Configuration.exe` on Windows, the AppImage's **Savage Wind
+   Configuration** desktop action or `--config` on Linux) opens the configuration screen: Play, Settings, your game
+   files (set them up again, rebuild the game code, delete them) and Quit. In game, Quit to Start Screen also comes
+   back to it.
+
+Coming from Alpha 2: extract Alpha 3 to a new folder and set the game files up again with your 1.9.0 files (the game
+code has to be built again); copy your `save` folder over to keep your progress. What's new is in
+[CHANGELOG.md](CHANGELOG.md).
 
 The setup and configuration screens show Savage Wind's own art. To see a picture of your own there instead, put it
-next to `savagewind.exe` as `splash.jpg` or `splash.png`; it's only read from your folder and never part of
+next to `savagewind.exe` (on Linux, in the data folder) as `splash.jpg` or `splash.png`; it's only read from your folder and never part of
 Savage Wind.
 
-Needs Windows 10 or later, a CPU with AVX2, a GPU with Vulkan 1.3 and about 35 GB of free disk space.
+Needs Windows 10 or later, a CPU with SSE4.2 (2008 or newer), a GPU with Vulkan 1.3 and about 35 GB of free disk
+space. AVX2 isn't required: on a CPU without AVX2 / FMA the setup builds the game code in a compatible mode, which runs
+slower.
 
 ## What you need
 
@@ -134,7 +147,8 @@ Needs Windows 10 or later, a CPU with AVX2, a GPU with Vulkan 1.3 and about 35 G
   - the **ExeFS** of that version (`main`, `main.npdm`, `rtld`, `sdk`, `subsdk0`)
   - the **RomFS** with that update applied (base game and update merged)
 - DLC: not supported yet (planned, see the roadmap); the title screen's Downloadable Content entry is hidden until then.
-- Windows 10 or later (x86-64, a CPU with AVX2) or Linux (x86-64), and a GPU with Vulkan 1.3.
+- Windows 10 or later or Linux, on x86-64 (a CPU with SSE4.2; without AVX2 / FMA the game code runs in a slower
+  compatible mode), and a GPU with Vulkan 1.3.
 
 The files go in `extracted/` next to the program (git ignores this folder):
 
@@ -163,13 +177,15 @@ Estimates of where each part stands. "Tested in game" is how much of the game ha
 | ✅ | **Settings in the game's Options** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Video, audio, controls and language pages drawn by the game itself |
 | ✅ | **Direct start + Configuration** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | savagewind.exe goes straight into the game; Savage Wind Configuration has the rest |
 | ✅ | **Window sizes and fullscreen** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | The sizes your display can show; windowed, borderless or exclusive |
+| ✅ | **Ultrawide** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Video > Fill wide screens (on by default): a window or screen wider than 16:9 (21:9, 32:9) shows more of the world to the sides instead of bars. The HUD stays 16:9 in the middle; the pause menu, the map and the start screen are shown 16:9. Narrower shapes (16:10, 4:3) keep the 16:9 picture with bars |
 | ✅ | **Internal resolution and FSR 1** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Native resolution up to 4K, or AMD FSR 1 quality modes |
 | ✅ | **Anisotropic filtering and sharpening** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Ground and paths sharp at a distance (2x to 16x); AMD CAS sharpening of the 3D image, useful with FSR 1 |
 | ✅ | **Higher-resolution shadows** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Sun shadows at the console's 896x896, or sharper at 2048, 4096 or 8192 (Video > Shadow resolution) |
 | ✅ | **Shader and pipeline cache** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Places you've already seen don't stutter again |
 | ✅ | **Full shader precompilation** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Optional and on by default, at setup or later in Savage Wind Configuration: all of the game's ~14,000 shaders are translated and compiled ahead of time, so new places and effects don't stutter the first time |
 | ✅ | **Faster game code build** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | The one-time setup takes about 15 minutes instead of about 40 (12 threads) from the next release: the game code builds in about 6 minutes instead of 30 ([#43](https://github.com/Revivedx/SavageWindRecomp/pull/43), by [@adriadam10](https://github.com/adriadam10)) |
-| ✅ | **Frame rate** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | 60 fps by default, or 30, 90, 120 or no limit, with the game at the same speed; menus, cutscenes and conversations at 30, as on the console |
+| ✅ | **Frame rate** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | 60 fps by default, or 30, 90, 120 or no limit, with the game at the same speed; menus, cutscenes and conversations too, and videos at their own speed |
+| ✅ | **Field of view** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Video > Field of view: 70% to 150% of the game's own in play; cutscenes and conversations keep theirs |
 | ✅ | **Steady 60 fps in the open world** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | Holds 60 fps in real play on the Great Plateau (RTX 3060, Ryzen 5 5600X); steady 120 fps (8 ms frames) is the next goal |
 | ✅ | **Game version 1.9.0** | ![100%](https://progress-bar.xyz/100/?width=150&style=square&progress_color=5cb85c) | The latest version and the supported one (its Thai text isn't offered yet). 1.8.2 still sets up and runs, but isn't supported: a bug is only fixed if it also happens on 1.9.0 |
 | 🔧 | **Horizon OS services** | ![90%](https://progress-bar.xyz/90/?width=150&style=square&progress_color=5cb85c) | Threads, files, controllers, applets and time: all the opening and the Great Plateau use |
@@ -179,13 +195,11 @@ Estimates of where each part stands. "Tested in game" is how much of the game ha
 | 🔧 | **Motion controls (gyro)** | ![80%](https://progress-bar.xyz/80/?width=150&style=square&progress_color=5cb85c) | The controller's gyroscope and accelerometer (DualSense, DualShock 4, Switch controllers, Steam Deck) for motion aiming and the tilt shrines; without one, hold T and move the mouse to tilt. Sensitivity and inversion in Options > Controls. Not yet tried with a real controller or in a shrine |
 | 🔧 | **Button icons for your device** | ![80%](https://progress-bar.xyz/80/?width=150&style=square&progress_color=5cb85c) | The game's button prompts show your bound keys and mouse buttons, or Xbox / PlayStation / Nintendo buttons, switching with the device you use |
 | 🔧 | **Variable refresh rate (VRR)** | ![80%](https://progress-bar.xyz/80/?width=150&style=square&progress_color=5cb85c) | Video > VSync: On lets G-SYNC and FreeSync displays show every frame as soon as it's ready, a little under the refresh rate; Fast (the default), Adaptive and Off too. Still to be tried on a VRR display |
-| 🔧 | **Tested in game** | ![10%](https://progress-bar.xyz/10/?width=150&style=square&progress_color=d9534f) | The Shrine of Resurrection and the Great Plateau; the rest of Hyrule is untested: [report what breaks](https://github.com/Revivedx/SavageWindRecomp/issues/new/choose) |
-| 🗺️ | **Linux** | ![30%](https://progress-bar.xyz/30/?width=150&style=square&progress_color=f0ad4e) | Builds and runs on x86-64 (from LAS Recomp); not yet tested with this game |
+| 🔧 | **Tested in game** | ![50%](https://progress-bar.xyz/50/?width=150&style=square&progress_color=f0ad4e) | The Shrine of Resurrection, the Great Plateau, and a walk through every region on a 100% save file. The main quests and the Divine Beasts aren't tested yet, so expect bugs there: [report what breaks](https://github.com/Revivedx/SavageWindRecomp/issues/new/choose) |
+| 🔧 | **Linux** | ![90%](https://progress-bar.xyz/90/?width=150&style=square&progress_color=5cb85c) | Builds and runs on x86-64 (from LAS Recomp); a steady 144 fps on an RTX 3070 Ti with a Ryzen 5 7600X, and no Linux-only issues so far |
 | 🗺️ | **AMD FSR 3 + frame generation** | ![5%](https://progress-bar.xyz/5/?width=150&style=square&progress_color=d9534f) | Planned: motion vectors from depth and the camera, FidelityFX SDK |
 | 🗺️ | **NVIDIA DLSS (RTX)** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned, after FSR 3; under NVIDIA's own SDK license |
 | 🗺️ | **Colour grading and HDR** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned: exposure, contrast and saturation settings, colour presets, fog and bloom on or off, and real HDR output on HDR displays |
-| 🗺️ | **Ultrawide (21:9)** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned: a wider field of view instead of the 16:9 image with bars |
-| 🗺️ | **Field of view** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned: a wider or narrower view in play, while cutscenes keep their framing |
 | 🗺️ | **Draw distance and detail** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned: trees, grass and objects drawn farther away on strong PCs, or nearer for more fps, and a fixed level of detail (the most detailed models at any distance) |
 | 🗺️ | **Free camera and photo mode** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned: a free camera with the HUD hidden and its own speed and sensitivity, for screenshots, and camera paths through keyframes for videos |
 | 🗺️ | **Effects on or off** | ![0%](https://progress-bar.xyz/0/?width=150&style=square&progress_color=d9534f) | Planned: a Video page that turns each of the game's own effects on or off, where BOTW has them: ambient occlusion, volumetric fog, grass (3 layers), character light (normal and custom), tone mapper, fragment and main lighting, bloom (3 layers), lens flare, cel shading, fog effects, water, torch fire, the sword sheath, depth of field (also when aiming the bow), screen-space reflections, global illumination and far lights |

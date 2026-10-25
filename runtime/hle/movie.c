@@ -1,7 +1,7 @@
 // movie:: (nnMedia) implemented with FFmpeg: an Android MediaExtractor/MediaCodec-style API.
 // The game owns the objects (vtable at +0); we keep host state at +8.
 //
-// Extractor slots: 4 GetTrackCount(int*), 5 GetTrackConfiguration(int, MediaData*), 6 SelectTrack(int),
+// Extractor slots: 2 SetDataSource(const char* path), 4 GetTrackCount(int*), 5 GetTrackConfiguration(int, MediaData*), 6 SelectTrack(int),
 //   9 GetSampleTrackIndex(size_t*), 10 Read(Buffer*), 11 Advance(), 12 GetSampleTime(int64*),
 //   15 SetDataSource(DataSource*, const char* path).
 // Decoder slots: 2 Configure(MediaData*), 3 RegisterClientEvents(EventType*[4]), 4 GetOutputFormat(MediaData*),
@@ -17,8 +17,10 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../hle.h"
+#include "../kernel.h"
 #include "../settings.h"
 
 #define MOVIE_EOS 4u
@@ -73,6 +75,8 @@ HLE_FUNC("_ZN5movie9MediaData5ClearEv", md_clear_hle) { md_clear(md(c->x[0])); }
 HLE_FUNC("_ZNK5movie9MediaData9FindInt32EPKcPi", md_find_int32) {
     MediaData *m = md(c->x[0]);
     const char *k = (const char *)(uintptr_t)c->x[1];
+    static int nlog;
+    if (getenv("SAVAGEWIND_MOVIE_DEBUG") && nlog++ < 60) LOG("[movie] FindInt32 \"%s\" (lr=%llx)\n", k, c->x[30]);
     for (int i = 0; i < m->n; i++)
         if (!m->e[i].is_str && !strcmp(m->e[i].key, k)) { *(int32_t *)(uintptr_t)c->x[2] = (int32_t)m->e[i].ival; c->x[0] = 1; return; }
     c->x[0] = 0;
@@ -217,6 +221,13 @@ static void ex_set_data_source(Cpu *c) {
     const char *rel = path && strstr(path, ":/") ? strstr(path, ":/") + 2 : path;
     char host[1024];
     snprintf(host, sizeof host, "%s/%s", g_romfs_dir, rel ? rel : "");
+    // the RomFS overlay's copy first (SAVAGEWIND_ROMFS_OVERLAY, services/fs.c): movies are read from the host
+    const char *ov = getenv("SAVAGEWIND_ROMFS_OVERLAY");
+    if (ov && *ov && rel) {
+        char alt[1024];
+        snprintf(alt, sizeof alt, "%s/%s", ov, rel);
+        if (access(alt, R_OK) == 0) snprintf(host, sizeof host, "%s", alt);
+    }
     LOG("[movie] open %s -> %s\n", path ? path : "(null)", host);
     if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
         LOG("[movie] cannot open %s\n", host);
@@ -234,6 +245,12 @@ static void ex_set_data_source(Cpu *c) {
             (e->fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && g_settings.movie_audio && !getenv("SAVAGEWIND_NO_MOVIE_AUDIO")))
             e->map[e->ntracks++] = (int)i;
     c->x[0] = 0;
+}
+
+// slot 2: SetDataSource(const char* path) (BOTW opens its movies this way; slot 15 takes a DataSource first)
+static void ex_set_data_source_path(Cpu *c) {
+    c->x[2] = c->x[1];
+    ex_set_data_source(c);
 }
 
 static void ex_get_track_count(Cpu *c) {
@@ -370,11 +387,12 @@ EX_LOCKED(ex_advance)
 EX_LOCKED(ex_get_sample_time)
 EX_LOCKED(ex_cached_duration)
 EX_LOCKED(ex_set_data_source)
+EX_LOCKED(ex_set_data_source_path)
 
 HLE_FUNC("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", movie_extractor_ctor) {
     uint64_t vt = g_ex_vt;
     if (!vt) {
-        HostFn f[16] = {ex_dtor_l, ex_dtor_l, movie_log_slot, movie_log_slot, ex_get_track_count_l,
+        HostFn f[16] = {ex_dtor_l, ex_dtor_l, ex_set_data_source_path_l, movie_log_slot, ex_get_track_count_l,
                         ex_get_track_config_l, ex_select_track_l, movie_log_slot, ex_seek_l, ex_get_sample_track_l,
                         ex_read_l, ex_advance_l, ex_get_sample_time_l, movie_log_slot, ex_cached_duration_l,
                         ex_set_data_source_l};
@@ -422,6 +440,8 @@ typedef struct {
     int64_t eos_time;
     bool stopped;  // Stop / destroyed: no more events (see dec_stop)
     bool playing;  // a started video decoder, counted in g_movie_playing
+    int fps;       // a video's frame rate (its file's)
+    int64_t clock_ns, clock_us;  // pacing: when the frame of time clock_us was handed out (0: not yet)
     pthread_mutex_t lock;
 } Decoder;
 
@@ -457,7 +477,7 @@ static void dec_signal(Cpu *c, Decoder *d, int i) {
     pthread_mutex_unlock(&d->lock);
 }
 
-typedef struct NvnTexture NvnTexture;
+#include "../nvn/nvn.h"
 void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride);
 
 static void dec_configure(Cpu *c) {
@@ -478,11 +498,17 @@ static void dec_configure(Cpu *c) {
     d->stride = (p->width + 255) & ~255;
     d->sample_rate = p->sample_rate;
     d->channels = p->ch_layout.nb_channels;
+    if (d->video) {  // (the "frame-rate" the extractor put in the track's MediaData)
+        for (int i = 0; i < m->n; i++)
+            if (!m->e[i].is_str && !strcmp(m->e[i].key, "frame-rate")) d->fps = (int)m->e[i].ival;
+        if (d->fps <= 0) d->fps = 30;
+    }
     d->in_cap = d->video ? 4 << 20 : 256 << 10;
     d->out_cap = d->video ? (uint32_t)(d->stride * ((d->height + 15) & ~15) * 3 / 2) : 64 << 10;
     for (int i = 0; i < NIN; i++) d->in_mem[i] = buf_get(d->in_cap);
     for (int i = 0; i < NOUT; i++) d->out_mem[i] = buf_get(d->out_cap);
-    LOG("[movie] decoder %s configured: %dx%d %d Hz %d ch\n", codec->name, d->width, d->height, d->sample_rate, d->channels);
+    LOG("[movie] decoder %s configured: %dx%d %d fps %d Hz %d ch\n", codec->name, d->width, d->height, d->fps,
+        d->sample_rate, d->channels);
     c->x[0] = 0;
 }
 
@@ -512,15 +538,29 @@ static void dec_output_format(Decoder *d, MediaData *m) {
 static void dec_get_output_format(Cpu *c) { dec_output_format(self_state(c), md(c->x[1])); c->x[0] = 0; }
 static void dec_get_output_buffer_format(Cpu *c) { dec_output_format(self_state(c), md(c->x[2])); c->x[0] = 0; }
 
-// Video decoders started and not stopped: a movie is playing. The game shows one of its pictures per frame, so the
-// frame rate is held at 30 meanwhile (runtime/hle/framepace.c).
+// Video decoders started and not stopped: a movie is playing. The game shows a new picture every frame it gets one,
+// so the pictures are paced by their time (movie_paced, dec_acquire_output) and the game keeps its frame rate, as Cemu
+// does; without the pacing (SAVAGEWIND_MOVIE_PACE=0) the frame rate is held at the movie's own meanwhile
+// (runtime/hle/framepace.c): 30 for the game's, 60 for a 60 fps replacement in the RomFS overlay.
 volatile int g_movie_playing;
+volatile int g_movie_fps = 30;
+
+bool movie_paced(void) {
+    static int on = -1;
+    if (on < 0) on = !getenv("SAVAGEWIND_MOVIE_PACE") || atoi(getenv("SAVAGEWIND_MOVIE_PACE")) != 0;
+    return on;
+}
 
 static void dec_start(Cpu *c) {
     Decoder *d = self_state(c);
     pthread_mutex_lock(&d->lock);
     d->stopped = false;
-    if (d->video && !d->playing) d->playing = true, __atomic_add_fetch(&g_movie_playing, 1, __ATOMIC_RELAXED);
+    if (d->video && !d->playing) {
+        d->playing = true;
+        d->clock_ns = 0;
+        g_movie_fps = d->fps > 0 ? d->fps : 30;
+        __atomic_add_fetch(&g_movie_playing, 1, __ATOMIC_RELAXED);
+    }
     pthread_mutex_unlock(&d->lock);
     dec_signal(c, d, 0);  // all input buffers are free
     c->x[0] = 0;
@@ -695,6 +735,26 @@ static void dec_acquire_output(Cpu *c) {
     pthread_mutex_lock(&d->lock);
     if (!d->nready) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }
     OutReady r = d->ready[0];
+    if (d->video && !(r.flags & MOVIE_EOS) && movie_paced()) {
+        // A picture is handed out once its time has come on a clock started at the first one: the game's player
+        // thread waits here until then (the emulated core released), and the game shows the last one meanwhile.
+        // (Answering "none yet" instead stalled the player: it waits for the output event, which a full decoder
+        // doesn't signal again.) Late by more than a frame or two (a hitch): the clock moves on to the picture
+        // instead of rushing through the ones after it.
+        int64_t now = av_gettime_relative() * 1000;
+        if (!d->clock_ns) d->clock_ns = now, d->clock_us = r.time;
+        int64_t due = d->clock_ns + (r.time - d->clock_us) * 1000;
+        if (now < due) {
+            int64_t wait = due - now < 100000000 ? due - now : 100000000;  // (100 ms at most: a bad timestamp)
+            pthread_mutex_unlock(&d->lock);
+            kernel_host_work_begin();
+            av_usleep((unsigned)(wait / 1000));
+            kernel_host_work_end();
+            pthread_mutex_lock(&d->lock);
+            if (!d->nready) { pthread_mutex_unlock(&d->lock); c->x[0] = 1; return; }  // (stopped meanwhile)
+            r = d->ready[0];
+        } else if (now - due > 100000000) d->clock_ns = now, d->clock_us = r.time;
+    }
     memmove(d->ready, d->ready + 1, --d->nready * sizeof *d->ready);
     int remaining = d->nready;
     pthread_mutex_unlock(&d->lock);
@@ -711,6 +771,16 @@ static void dec_get_output_buffer(Cpu *c) {
     int i = (int)c->x[1];
     MBuffer *b = BUF(c->x[2]);
     if (i < 0 || i >= NOUT) { c->x[0] = 1; return; }
+    static int nlog;
+    if (d->video && getenv("SAVAGEWIND_MOVIE_DEBUG") && nlog++ < 4) {
+        LOG("[movie] GetOutputBuffer %d: base %llx capacity %llu (lr=%llx)\n", i, (unsigned long long)b->base,
+            (unsigned long long)b->capacity, c->x[30]);
+        if (b->base && b->capacity == 8) {
+            NvnTexture *t = *(NvnTexture **)(uintptr_t)b->base;
+            if (t) LOG("[movie]   texture %ux%u format %u target %u flags %#x stride %llu block_h %u fmt %s\n", t->width,
+                       t->height, t->format, t->target, t->flags, (unsigned long long)t->stride, t->layout.block_height_log2, t->layout.fmt ? t->layout.fmt->name : "?");
+        }
+    }
     if (d->video && b->base && b->capacity == 8) {
         // texture output mode: the buffer points at the game's NVNtexture; write RGBA into it
         NvnTexture *t = *(NvnTexture **)(uintptr_t)b->base;
@@ -724,6 +794,30 @@ static void dec_get_output_buffer(Cpu *c) {
         int dst_stride[1] = {w * 4};
         sws_scale(d->sws, src, src_stride, 0, h, dst, dst_stride);
         renderer_upload_rgba(t, d->rgba, (uint32_t)w, (uint32_t)h, (uint32_t)w * 4);
+        c->x[0] = 0;
+        return;
+    }
+    int w = d->width, h = d->height;
+    if (d->video && b->base && b->capacity >= (uint64_t)w * h * 3 / 2) {
+        // the game's own buffer (BOTW: output format 4, mode 1, two buffers of width x height x 1.5): the picture
+        // goes into it packed, the luma at a stride of the width and the chroma right after it (NV12, or I420 with
+        // SAVAGEWIND_MOVIE_PLANAR=1)
+        static int planar = -1;
+        if (planar < 0) planar = getenv("SAVAGEWIND_MOVIE_PLANAR") && *getenv("SAVAGEWIND_MOVIE_PLANAR") != '0';
+        const uint8_t *src = d->out_mem[i], *src_uv = src + d->stride * ((h + 15) & ~15);
+        uint8_t *dst = (uint8_t *)(uintptr_t)b->base, *dst_uv = dst + (size_t)w * h;
+        for (int y = 0; y < h; y++) memcpy(dst + (size_t)y * w, src + (size_t)y * d->stride, (size_t)w);
+        if (!planar) {
+            for (int y = 0; y < h / 2; y++) memcpy(dst_uv + (size_t)y * w, src_uv + (size_t)y * d->stride, (size_t)w);
+        } else {
+            uint8_t *u = dst_uv, *v = dst_uv + (size_t)(w / 2) * (h / 2);
+            for (int y = 0; y < h / 2; y++) {
+                const uint8_t *row = src_uv + (size_t)y * d->stride;
+                for (int x = 0; x < w / 2; x++) u[(size_t)y * (w / 2) + x] = row[2 * x], v[(size_t)y * (w / 2) + x] = row[2 * x + 1];
+            }
+        }
+        b->size = (int32_t)((size_t)w * h * 3 / 2);
+        b->offset = 0;
         c->x[0] = 0;
         return;
     }
@@ -797,6 +891,9 @@ HLE_FUNC("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11Dec
         vt = g_dec_vt = make_vtable(f, 19, "Decoder");
     }
     uint64_t *self = (uint64_t *)(uintptr_t)c->x[0];
+    if (getenv("SAVAGEWIND_MOVIE_DEBUG"))
+        LOG("[movie] Decoder(type %llu, output format %llu, mode %llu, %lld) (lr=%llx)\n", c->x[1], c->x[2], c->x[3],
+            (long long)c->x[4], c->x[30]);
     Decoder *d = calloc(1, sizeof *d);
     movie_track(1, d, true);
     pthread_mutex_init(&d->lock, NULL);

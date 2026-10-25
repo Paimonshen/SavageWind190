@@ -502,27 +502,52 @@ static void tab_display(void) {
         g_settings.fullscreen = fs;
         g_want_window_apply.store(true);
     }
-    {   // Window size (runtime/window_size.c): the sizes the display can show, grouped by shape
+    {   // Window size (runtime/window_size.c): the sizes the display can show, its own first, then grouped by shape
         WinSize list[WINSIZE_MAX];
-        static char names_buf[WINSIZE_MAX][32];
+        static char names_buf[WINSIZE_MAX][64];
         const char *names[WINSIZE_MAX];
         int n = winsize_list(list, g_settings.fullscreen), cur = 0, def = 0;
         WinSize e = winsize_effective(g_settings.fullscreen), d = winsize_default(g_settings.fullscreen);
         WinSize desk = winsize_desktop();
         for (int i = 0; i < n; i++) {
-            winsize_name(list[i], names_buf[i], sizeof names_buf[i]);
+            winsize_name(list[i], tr("native"), names_buf[i], sizeof names_buf[i]);
             names[i] = names_buf[i];
             if (list[i].w == e.w && list[i].h == e.h) cur = i;
             if (list[i].w == d.w && list[i].h == d.h) def = i;
         }
         char desc[600];
         snprintf(desc, sizeof desc, tr("The size of the game's window, or of the screen in fullscreen. Only the sizes your "
-                                       "display can show, grouped by shape (the game itself stays 16:9, with bars on "
-                                       "wider screens).\n\nYour display: %d x %d."), desk.w, desk.h);
-        if (opt_choice("Window size", &cur, names, n, def, desc, false)) {
+                                       "display can show: its own first, then grouped by shape. A shape wider than 16:9 "
+                                       "is filled with Fill wide screens on; any other keeps 16:9 with bars.\n\nYour display: %d x %d."), desk.w, desk.h);
+        if (opt_choice("Window size", &cur, names, n, def, desc)) {  // (past either end: the other one)
             g_settings.window_w = list[cur].w, g_settings.window_h = list[cur].h;
             g_want_window_apply.store(true);
         }
+    }
+    {   // Fill wide screens (runtime/nvn/output_scale.c rt_persp)
+        bool wv = g_settings.wide_view;
+        if (opt_toggle("Fill wide screens", &wv, true,
+                       "On a window or screen wider than 16:9 (21:9, 32:9) the game shows more to the sides instead "
+                       "of black bars. The HUD stays 16:9 in the middle; the pause menu, the map and the start "
+                       "screen are shown 16:9."))
+            g_settings.wide_view = wv;
+    }
+    {   // Field of view (runtime/nvn/output_scale.c rt_persp)
+        static const int fov[] = FOV_CHOICES;
+        enum { NV = sizeof fov / sizeof fov[0] };
+        static char names_buf[NV][16];
+        const char *names[NV];
+        int cur = 0, def = 0;
+        for (int i = 0; i < NV; i++) {
+            snprintf(names_buf[i], sizeof names_buf[i], "%d%%", fov[i]);
+            names[i] = names_buf[i];
+            if (fov[i] == g_settings.fov) cur = i;
+            if (fov[i] == 100) def = i;
+        }
+        if (opt_choice("Field of view", &cur, names, NV, def,
+                       "How much of the world the camera shows in play: 100% is the game's own. Cutscenes and "
+                       "conversations keep theirs.", false))
+            g_settings.fov = fov[cur];
     }
     {   // Frame rate (runtime/hle/framepace.c)
         static const int fps[] = FPS_CHOICES;
@@ -538,8 +563,8 @@ static void tab_display(void) {
         }
         std::string desc = tr("How many pictures a second the game draws. The game itself runs at the same speed at "
                               "every rate (the console runs it at 30). Higher rates need a faster computer. Menus, "
-                              "cutscenes and conversations run at 30, as on the console. Off: as many as the computer "
-                              "can draw.");
+                              "cutscenes and conversations use it too, and videos play at their own speed. Off: as "
+                              "many as the computer can draw.");
         int hz = (int)lroundf(winsize_refresh_rate());
         if (hz > 0) {
             char line[200];

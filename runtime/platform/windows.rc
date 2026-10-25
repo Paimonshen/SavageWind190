@@ -1,2 +1,5 @@
 // The .exe's icon (Makefile: windres -I docs/icon). ID 1: Explorer and the taskbar use the first icon resource.
 1 ICON "icon.ico"
+// The process's ANSI code page is UTF-8 (Windows 10 1903+): fopen / stat / opendir and the -A calls take the UTF-8
+// paths SDL's dialogs, the environment and the rest of the runtime use, so folders with accents or other scripts work.
+1 24 "windows.manifest"

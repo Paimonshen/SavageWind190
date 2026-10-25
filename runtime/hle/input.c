@@ -61,6 +61,18 @@ static void recompute_keyboard(void) {
     if (tilt_key != tilt_held) motion_tilt_held(tilt_held = tilt_key);
 }
 
+// A controller's stick with a radial dead zone (Controls page, a fraction of full tilt): within it the stick reads 0,
+// past it the tilt is rescaled so it still starts from 0 and reaches full. The Switch's input service has one, and
+// the game counts on it: its menus mute a stick when they open until the stick is back within 1% of center
+// (FUN_7100fe8dc0, 1.8.2), so a stick resting a few percent off center (most do) stayed muted in the map and menus,
+// and a worn one drifted in play.
+static void dead_zone(_Atomic int32_t *x, _Atomic int32_t *y, int32_t rx, int32_t ry, float dz) {
+    double m = sqrt((double)rx * rx + (double)ry * ry) / 32767;
+    if (m <= dz || m <= 0) { *x = 0, *y = 0; return; }
+    double k = (m >= 1 ? 1 : (m - dz) / (1 - dz)) / m;
+    *x = (int32_t)lround(rx * k), *y = (int32_t)lround(ry * k);
+}
+
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
 static void recompute_pad(void) {
     uint32_t host = test_pad;
@@ -75,10 +87,10 @@ static void recompute_pad(void) {
         if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
     pad_buttons = b;
     if (!pad || host_test) { pad_lx = test_lx, pad_ly = test_ly, pad_rx = pad_ry = 0; return; }
-    pad_lx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX);
-    pad_ly = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY);
-    pad_rx = SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX);
-    pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
+    dead_zone(&pad_lx, &pad_ly, SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTX),
+              -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFTY), g_settings.stick_deadzone[0]);
+    dead_zone(&pad_rx, &pad_ry, SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTX),
+              -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY), g_settings.stick_deadzone[1]);
 }
 
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.

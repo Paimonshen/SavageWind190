@@ -59,7 +59,8 @@ with `extracted/` in the starting folder keeps using that folder instead.
   the startup retry when the guest window is taken, which on Windows starts a new process and exits.
 
 ## Tests
-- `tools/test_translate.sh`: shader translator fuzz (MSL output unchanged, GLSL compiles and validates).
+- `tools/test_translate.sh`: shader translator fuzz (every GLSL translation compiles and validates; with `REF=<commit>`,
+  also the MSL output compared with that commit's translator). Exits 1 on any failure.
 - `tools/test_vk_pipelines.sh`: fuzzed shaders through the backend's compile/reflection into real pipelines.
 - `SAVAGEWIND_VK_VALIDATION=1` with `VK_ADD_LAYER_PATH` pointing at `C:\msys64\ucrt64\bin`: Khronos validation layer.
 - Run test windows directly, not under MSYS `timeout` (it stalls the window).

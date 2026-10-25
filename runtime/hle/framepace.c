@@ -25,16 +25,18 @@
 //     above ~43 fps (the game's own 60 fps branches, made for its debug viewer), 2 below ~35, 3 below ~23. A step is 1/20 s at most (ratio 1.5, the console's longest):
 //     a hitch is paid back over the next frames, but frames slower than that for long (over 1/4 s owed) slow the
 //     game down, as on the console, instead of taking steps big enough to break the physics;
-//   - holds the frame rate at 30 in the menus (the title screen, the pause menu and the map) and the events
-//     (cutscenes, talks: some of their waits count frames), whose timing is the console's, and while a movie plays
-//     (movie.c: the pre-rendered cutscenes show a picture per frame);
+//   - runs the menus (the title screen, the pause menu and the map) and the events (cutscenes, talks) at the chosen
+//     frame rate too, as Cemu's FPS++ does: the menus' speed follows the frame's length (rt_gui_speed, below), and
+//     movies are paced by their pictures' time (movie.c). SAVAGEWIND_MENU_FPS / SAVAGEWIND_EVENT_FPS hold them at a
+//     rate (30: the console's; some events' waits count frames);
 //   - steps the controllers' hold counters by the frame's length (CONTROLLER_STEP, below).
 // Test and debug switches:
 //   SAVAGEWIND_FPS=<n>             frame rate instead of the setting (0: no limit)
 //   SAVAGEWIND_FRAMEPACE=0         the game's own pacing and clock (its 30 / 20 fps, as before)
-//   SAVAGEWIND_MOVIE_FPS=<n>       frame rate while a movie plays (default 30; 0: the chosen one)
-//   SAVAGEWIND_MENU_FPS=<n>        frame rate in the menus (default 30; 0: the chosen one)
-//   SAVAGEWIND_EVENT_FPS=<n>       frame rate in the events (default 30; 0: the chosen one)
+//   SAVAGEWIND_MOVIE_FPS=<n>       frame rate while a movie plays (default: the chosen one, the pictures paced by
+//                                  their time; with SAVAGEWIND_MOVIE_PACE=0 the movie's own; 0: the chosen one)
+//   SAVAGEWIND_MENU_FPS=<n>        frame rate in the menus (default 0: the chosen one; 30: the console's)
+//   SAVAGEWIND_EVENT_FPS=<n>       frame rate in the events (default 0: the chosen one; 30: the console's)
 //   SAVAGEWIND_LOG_FRAMEPACE=<n>   every n clock updates: target, frame length, VFR ratio and interval
 //   SAVAGEWIND_NO_CONTROLLER_STEP=1  the controllers count presented frames (as the game does)
 #include <math.h>
@@ -49,6 +51,7 @@
 #include "../window_size.h"
 
 extern volatile int g_movie_playing;  // runtime/hle/movie.c: video decoders running
+extern volatile int g_movie_fps;      // runtime/hle/movie.c: the playing movie's frame rate
 
 #define VF(T, base, off) (*(T *)(uintptr_t)((base) + (off)))
 #define PAUSE_STATE g_site.pause_state  // (u32: 0 playing, 2 in the pause menu or the map)
@@ -82,15 +85,35 @@ static bool in_event(void) {
     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
 }
 
+bool framepace_in_event(void) { return in_event(); }
+
+// The game's UI screen `id` exists (the screen manager's array; ids as runtime/ui/game_options.mm uses them)
+static bool screen_up(uint32_t id) {
+    uint64_t mgr = *(uint64_t *)(uintptr_t)g_site.screen_mgr;
+    if (!mgr || VF(uint32_t, mgr, 0x28) <= id) return false;
+    uint64_t arr = VF(uint64_t, mgr, 0x30);
+    return arr && *(uint64_t *)(uintptr_t)(arr + 8 * id);
+}
+
+// (screens: 1 the start screen, 0x38 its load and confirmation menus)
+bool framepace_title_ui(void) { return screen_up(1) || screen_up(0x38); }
+
+// (pause state 2: the pause menu's pages and the map; 4 is the quick menus over the game)
+bool framepace_menu_ui(void) { return *(uint32_t *)(uintptr_t)PAUSE_STATE == 2; }
+
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("SAVAGEWIND_FPS", -1);
-    if (movie == -2) movie = env_int("SAVAGEWIND_MOVIE_FPS", 30);
-    if (menu == -2) menu = env_int("SAVAGEWIND_MENU_FPS", 30);
-    if (event == -2) event = env_int("SAVAGEWIND_EVENT_FPS", 30);
+    extern bool movie_paced(void);
+    if (movie == -2) movie = env_int("SAVAGEWIND_MOVIE_FPS", movie_paced() ? 0 : -1);  // (-1: the movie's own frame rate)
+    if (menu == -2) menu = env_int("SAVAGEWIND_MENU_FPS", 0);
+    if (event == -2) event = env_int("SAVAGEWIND_EVENT_FPS", 0);
     int fps = forced >= 0 ? forced : g_settings.fps_limit;
     if (fps < 0) fps = FPS_DEFAULT;
-    if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
+    if (movie != 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0) {
+        int cap = movie > 0 ? movie : g_movie_fps;
+        if (fps == 0 || fps > cap) fps = cap;
+    }
     if (menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
     if (event > 0 && (fps == 0 || fps > event) && in_event()) fps = event;
     return fps;
@@ -155,6 +178,16 @@ void framepace_presented(uint64_t t, bool on_grid) {
     static int fixed = -1;
     if (fixed < 0) fixed = env_int("SAVAGEWIND_NO_CONTROLLER_STEP", 0);
     if (!fixed) *(float *)(uintptr_t)CONTROLLER_STEP = g_step;
+}
+
+// The menus' speed: every frame the game sets a GUI speed to its integer interval x 0.5: 1 at 30 fps, 0.5 at 60, and
+// never lower, so the menus' cursor and animations ran faster above 60 fps (and at 60 when the interval follows the
+// frame rate). It becomes the frame's length in console frames, as Cemu's FPS++ does on the Wii U.
+// SAVAGEWIND_NO_GUI_SPEED=1: the game's own.
+float rt_gui_speed(float game) {
+    static int off = -1;
+    if (off < 0) off = env_int("SAVAGEWIND_NO_GUI_SPEED", 0);
+    return off || !framepace_on() ? game : g_step;
 }
 
 // ------------------------------------------------------------------ the game's clock (ksys::VFR)

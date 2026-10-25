@@ -97,6 +97,7 @@ struct Item {
     const char *(*desc_fn)(const Item &);        // a description made when shown (NULL: desc)
     void (*reset)(const Item &);                 // "reset to defaults" when it isn't set(def)
     bool (*value_off)(const Item &, int v);      // KIND_CHOICE: value v can't be picked yet (shown greyed)
+    bool wrap;                                   // KIND_CHOICE: a step past either end goes to the other one
 };
 
 std::vector<Item> g_items;
@@ -147,6 +148,12 @@ static_assert(k_sens[SENS_DEFAULT] == 300);
 constexpr int k_motion_sens[] = {25, 50, 75, 100, 125, 150, 200, 250, 300, 400};  // motion sensitivity, %
 constexpr int MOTION_SENS_DEFAULT = 3;
 static_assert(k_motion_sens[MOTION_SENS_DEFAULT] == 100);
+constexpr int k_fov[] = FOV_CHOICES;  // field of view, % of the game's own
+constexpr int FOV_DEFAULT_INDEX = 3;
+static_assert(k_fov[FOV_DEFAULT_INDEX] == 100);
+constexpr int k_deadzone[] = {0, 3, 5, 8, 10, 12, 15, 20, 25, 30, 40};  // stick dead zone, % of full tilt
+constexpr int DEADZONE_DEFAULT = 4;
+static_assert(k_deadzone[DEADZONE_DEFAULT] == (int)(STICK_DEADZONE_DEFAULT * 100 + 0.5f));
 const char *const k_invert[] = {"Off", "Up and down", "Left and right", "Both"};  // (MOTION_INVERT_* bits)
 #define N(a) (int)(sizeof(a) / sizeof((a)[0]))
 
@@ -171,6 +178,14 @@ Item choice(int page, const char *title, const char *desc, int (*count)(const It
     Item it = toggle(page, title, desc, get, set, def);
     it.kind = KIND_CHOICE, it.count = count, it.label = label;
     return it;
+}
+
+// KIND_CHOICE: the values the game's row has. A wrapping choice has two more, 0 and count + 1, one past each end:
+// stepping onto one stores the value at the other end (value v is the game's v + 1)
+int game_count(const Item &it) { return it.kind != KIND_CHOICE ? 2 : it.count(it) + (it.wrap ? 2 : 0); }
+int game_value(const Item &it, int g) {
+    int n = it.count(it);
+    return it.wrap ? (g - 1 + n) % n : g;
 }
 
 Item button(int page, const char *title, const char *desc, const char *text, int action, int arg) {
@@ -247,10 +262,10 @@ void build_items(void) {
                          return winsize_items(list);
                      },
                      [](const Item &, int x) {
-                         static char buf[48];
+                         static char buf[64];
                          WinSize list[WINSIZE_MAX];
                          int n = winsize_items(list);
-                         winsize_name(list[x < n ? x : 0], buf, sizeof buf);
+                         winsize_name(list[x < n ? x : 0], tr("native"), buf, sizeof buf);
                          return (const char *)buf;
                      },
                      [](const Item &) { return winsize_index(winsize_effective(g_settings.fullscreen)); },
@@ -271,7 +286,20 @@ void build_items(void) {
         g_settings.window_w = g_settings.window_h = 0;
         menu_request_window_apply();
     };
+    ws.wrap = true;
     v.push_back(ws);
+    v.push_back(toggle(P_VIDEO, "Fill wide screens", "Shows more to the sides on screens wider than 16:9, instead of bars.",
+                       [](const Item &) { return (int)g_settings.wide_view; },
+                       [](const Item &, int x) { g_settings.wide_view = x; }, 1));
+    v.push_back(choice(P_VIDEO, "Field of view", "How much the camera shows in play. Cutscenes keep their own.",
+                       [](const Item &) { return N(k_fov); },
+                       [](const Item &, int x) {
+                           static std::string str;
+                           str = pct(k_fov[x]);
+                           return str.c_str();
+                       },
+                       [](const Item &) { return nearest(k_fov, N(k_fov), (float)g_settings.fov); },
+                       [](const Item &, int x) { g_settings.fov = k_fov[x]; }, FOV_DEFAULT_INDEX));
     Item fps = choice(P_VIDEO, "Frame rate", "",
                       [](const Item &) { return N(k_fps); }, fps_label,
                       [](const Item &) {
@@ -371,6 +399,20 @@ void build_items(void) {
     v.push_back(toggle(P_CONTROLS, "D-pad as left stick", "The d-pad also moves like the left stick.",
                        [](const Item &) { return (int)g_settings.dpad_move; },
                        [](const Item &, int x) { g_settings.dpad_move = x; }, 0));
+    for (int s = 0; s < 2; s++)  // (runtime/hle/input.c dead_zone)
+        v.push_back(choice(P_CONTROLS, s ? "Right stick dead zone" : "Left stick dead zone",
+                           "How far the stick must move before it counts. Raise it if the stick drifts.",
+                           [](const Item &) { return N(k_deadzone); },
+                           [](const Item &, int x) {
+                               static std::string str;
+                               str = pct(k_deadzone[x]);
+                               return str.c_str();
+                           },
+                           s ? [](const Item &) { return nearest(k_deadzone, N(k_deadzone), g_settings.stick_deadzone[1] * 100); }
+                             : [](const Item &) { return nearest(k_deadzone, N(k_deadzone), g_settings.stick_deadzone[0] * 100); },
+                           s ? [](const Item &, int x) { g_settings.stick_deadzone[1] = k_deadzone[x] / 100.0f; }
+                             : [](const Item &, int x) { g_settings.stick_deadzone[0] = k_deadzone[x] / 100.0f; },
+                           DEADZONE_DEFAULT));
     v.push_back(toggle(P_CONTROLS, "Mouse camera", "The mouse turns the camera. Esc frees the cursor.",
                        [](const Item &) { return (int)g_settings.mouse_camera; },
                        [](const Item &, int x) { g_settings.mouse_camera = x; }, 1));
@@ -474,7 +516,7 @@ bool install(void) {
         e.kind = (uint32_t)it.kind;
         e.title = m + MSG_TITLE, e.desc = m + MSG_DESC;
         e.first_value = m + MSG_VALUE;
-        e.last_value = m + MSG_VALUE + (it.kind == KIND_CHOICE ? it.count(it) - 1 : 1);
+        e.last_value = m + MSG_VALUE + game_count(it) - 1;
         e.button_off = e.button_on = m + MSG_BUTTON;
         g_entries.push_back(e);
     }
@@ -598,7 +640,7 @@ extern "C" void rt_opt_rows(void) {
     g_shown.assign(g_items.size(), -1);
     for (size_t i = 0; i < g_items.size(); i++) {  // (how many window sizes there are depends on the display)
         Entry &e = g_entries[GAME_ENTRIES + i];
-        if (g_items[i].kind == KIND_CHOICE) e.last_value = e.first_value + g_items[i].count(g_items[i]) - 1;
+        if (g_items[i].kind == KIND_CHOICE) e.last_value = e.first_value + game_count(g_items[i]) - 1;
     }
     wr64(OPT_ORDER, (uint64_t)(uintptr_t)o.data());
     wr32(OPT_ROWS, (uint32_t)o.size());
@@ -624,8 +666,8 @@ extern "C" int rt_opt_read(uint64_t row) {
     size_t idx = (size_t)(it - g_items.data());
     int x = clamp_value(*it, idx < g_shown.size() && g_shown[idx] >= 0 ? g_shown[idx] : it->get(*it));
     wr8(row + 0x54, x != 0);
-    wr32(row + 0x58, (uint32_t)x);
-    wr32(row + 0x5c, (uint32_t)(it->kind == KIND_CHOICE ? it->count(*it) - 1 : 1));
+    wr32(row + 0x58, (uint32_t)(x + (it->kind == KIND_CHOICE && it->wrap)));
+    wr32(row + 0x5c, (uint32_t)(game_count(*it) - 1));
     wr32(row + 0x60, 0);
     return 1;
 }
@@ -634,10 +676,15 @@ extern "C" int rt_opt_store(uint64_t row) {
     const Item *it = item_of_row(row);
     if (!it) return 0;
     size_t idx = (size_t)(it - g_items.data());
+    bool past_end = false;
     if (it->kind == KIND_TOGGLE) {
         it->set(*it, rd32(row + 0x54) & 0xff ? 1 : 0);
     } else if (it->kind == KIND_CHOICE) {
-        int x = clamp_value(*it, (int)rd32(row + 0x58));
+        int g = (int)rd32(row + 0x58), gn = game_count(*it);
+        g = g < 0 ? 0 : g >= gn ? gn - 1 : g;
+        past_end = it->wrap && (g == 0 || g == gn - 1);
+        int x = clamp_value(*it, game_value(*it, g));
+        if (past_end) wr32(row + 0x58, (uint32_t)(x + 1));  // (the row's next step goes on from there)
         bool off = it->value_off && it->value_off(*it, x);  // (shown, not stored)
         if (idx < g_shown.size()) g_shown[idx] = off ? x : -1;
         if (!off) it->set(*it, x);
@@ -646,6 +693,7 @@ extern "C" int rt_opt_store(uint64_t row) {
     }
     if (it->kind != KIND_BUTTON) settings_save();
     if (it->page == P_VIDEO) mark_all_rows(rd64(row));  // (the sizes offered follow Fullscreen, texts the upscaler)
+    if (past_end) g_dirty.push_back(row);                // (first: the row shows the value at the other end)
     return 1;
 }
 
@@ -673,9 +721,10 @@ extern "C" int rt_opt_msg(uint32_t id, uint64_t out) {
     if (part == MSG_TITLE) s = tr(it->title);
     else if (part == MSG_DESC) s = it->desc_fn ? it->desc_fn(*it) : tr(it->desc);
     else if (part == MSG_BUTTON) s = it->button ? tr(it->button) : it->label ? it->label(*it, -1) : "";
-    else if (part >= MSG_VALUE && it->kind == KIND_CHOICE && (int)(part - MSG_VALUE) < it->count(*it)) {
-        s = it->label(*it, (int)(part - MSG_VALUE));
-        grey = it->value_off && it->value_off(*it, (int)(part - MSG_VALUE));
+    else if (part >= MSG_VALUE && it->kind == KIND_CHOICE && (int)(part - MSG_VALUE) < game_count(*it)) {
+        int v = game_value(*it, (int)(part - MSG_VALUE));
+        s = it->label(*it, v);
+        grey = it->value_off && it->value_off(*it, v);
     }
     put_text(id, s, out, grey);
     return 1;

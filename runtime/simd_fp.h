@@ -17,7 +17,9 @@ SI int FN(issnan)(U u) { return FN(isnan)(u) && !(u & QB); }
 SI int FN(isqnan)(U u) { return FN(isnan)(u) && (u & QB); }
 SI int FN(isinf)(U u) { return (u & ~SGN) == EXPM; }
 SI int FN(iszero)(U u) { return !(u & ~SGN); }
-SI int FN(isden)(U u) { return !(u & EXPM) && (u & ~SGN); }
+// (A denormal by its fraction bits: "u & ~SGN" != 0 compiles to a float compare with zero, which MXCSR.DAZ - FPCR.FZ
+// on x86-64 - makes true for denormals, so they were kept instead of flushed.)
+SI int FN(isden)(U u) { return !(u & EXPM) && (u & (MINN - 1)); }
 SI T FN(flush)(T x) { U u = FN(fb)(x); return FN(isden)(u) ? FN(fv)(u & SGN) : x; }
 SI T FN(fz)(Cpu *c, T x) { return __builtin_expect(c->fpcr & FPCR_FZ, 0) ? FN(flush)(x) : x; }
 SI T FN(neg)(T x) { return FN(fv)(FN(fb)(x) ^ SGN); }
@@ -51,6 +53,20 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
     return FN(fv)(DNAN);
 }
 
+// x*y + z with one rounding, for scalars and vectors (simd.h: the FMA instructions or simd_softfma.h)
+#ifdef SIMD_SOFT_FMA
+SI VT FN(vsoft_fma)(VT x, VT y, VT z) {
+    VT r;
+    for (int i = 0; i < NL; i++) r[i] = FN(simd_soft_fma)(x[i], y[i], z[i]);
+    return r;
+}
+#ifndef SIMD_FMA
+#define SIMD_FMA(x, y, z) _Generic((x), T: FN(simd_soft_fma), VT: FN(vsoft_fma))(x, y, z)
+#endif
+#elif !defined(SIMD_FMA)
+#define SIMD_FMA(x, y, z) __builtin_elementwise_fma(x, y, z)
+#endif
+
 // The arithmetic itself, for scalars (KK = K) and vectors (KK = VK). MADD: a + b*d (a = addend).
 // RECPS/RSQRTS get their first operand already negated (FPNeg happens before NaN processing).
 #define FCALC(op, a, b, d, KK)                                                                       \
@@ -58,9 +74,9 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
    : (op) == FOP_MUL || (op) == FOP_MULX ? (a) * (b) : (op) == FOP_NMUL ? -((a) * (b))              \
    : (op) == FOP_DIV ? (a) / (b) : (op) == FOP_ABD ? __builtin_elementwise_abs((a) - (b))          \
    : (op) == FOP_SQRT ? __builtin_elementwise_sqrt(a)                                              \
-   : (op) == FOP_MADD ? __builtin_elementwise_fma(b, d, a)                                         \
-   : (op) == FOP_RECPS ? __builtin_elementwise_fma(a, b, KK(2))                                    \
-   : (op) == FOP_RSQRTS ? __builtin_elementwise_fma(a, b, KK(3)) * KK(0.5) : (a))
+   : (op) == FOP_MADD ? SIMD_FMA(b, d, a)                                                          \
+   : (op) == FOP_RECPS ? SIMD_FMA(a, b, KK(2))                                                     \
+   : (op) == FOP_RSQRTS ? SIMD_FMA(a, b, KK(3)) * KK(0.5) : (a))
 
 // Lanes whose fast result needs fixing: NaN results (NaN operand or invalid op), RSQRTS overflow.
 #define FBAD(op, r) ((op) == FOP_RSQRTS ? ((r) != (r)) | (__builtin_elementwise_abs(r) == K(INFINITY)) : (r) != (r))
@@ -68,9 +84,9 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
 // (3 + a*b) / 2 with one rounding (a already negated): halve a normal operand first, so a product beyond
 // the format's range (which the fast path rounds to inf, or to the largest normal when rounding down) is exact.
 SN T FN(rsqrts)(T a, T b) {
-    if (__builtin_elementwise_abs(a) >= FN(fv)(2 * MINN)) return __builtin_elementwise_fma(a * K(0.5), b, K(1.5));
-    if (__builtin_elementwise_abs(b) >= FN(fv)(2 * MINN)) return __builtin_elementwise_fma(a, b * K(0.5), K(1.5));
-    return __builtin_elementwise_fma(a, b, K(3)) * K(0.5);
+    if (__builtin_elementwise_abs(a) >= FN(fv)(2 * MINN)) return SIMD_FMA(a * K(0.5), b, K(1.5));
+    if (__builtin_elementwise_abs(b) >= FN(fv)(2 * MINN)) return SIMD_FMA(a, b * K(0.5), K(1.5));
+    return SIMD_FMA(a, b, K(3)) * K(0.5);
 }
 
 // ARM result for a lane flagged by FBAD. (The fast paths' operands aren't flushed: FZ is the host's there.)
@@ -167,8 +183,8 @@ SI VTU FN(vsel)(VTS m, VTU x, VTU y) { return (x & (VTU)m) | (y & ~(VTU)m); }
 
 SI VT FN(vfz)(Cpu *c, VT a) {
     if (__builtin_expect(c->fpcr & FPCR_FZ, 0)) {
-        VTU u = (VTU)a, mag = u & ~((VTU){} + SGN);
-        VTS den = (mag != 0) & ((u & EXPM) == 0);
+        VTU u = (VTU)a;
+        VTS den = ((u & (MINN - 1)) != 0) & ((u & EXPM) == 0);  // (fraction bits: as isden)
         a = (VT)FN(vsel)(den, u & SGN, u);
     }
     return a;

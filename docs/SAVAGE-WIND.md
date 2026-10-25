@@ -725,6 +725,13 @@ Pendiente:
        operandos a mano. La única diferencia con ARM: un resultado que redondea al menor normal desde abajo puede
        quedarse (ARM detecta el underflow antes de redondear). Cambia `simd.h` y el lifter: hay que regenerar y
        recompilar la librería del juego.
+     - CPU sin AVX2 / FMA (#9): en x86-64 el código del juego tiene dos destinos, x86-64-v3 (`GENARCH`) y el
+       compatible x86-64-v2 (`GENARCH_COMPAT`, sin `-mfma`). La pantalla de inicio compila el que corre la CPU
+       (`gamelib_compat`, `runtime/gamelib.h`), cada uno con su id (`GAMELIB_ID`, `GAMELIB_ID_COMPAT`): una
+       librería v3 nunca se carga en una CPU que no la corre, y una carpeta llevada a un PC del otro tipo se vuelve
+       a compilar. Sin instrucciones FMA `simd.h` usa su propio fma (`simd_softfma.h`, que sigue al MXCSR como
+       ellas; `tools/test_softfma.c` lo compara bit a bit): el de glibc se equivoca con FTZ / DAZ o redondeos
+       dirigidos. `SAVAGEWIND_COMPAT_CPU=1` elige el compatible en cualquier CPU (para comparar los dos).
      - Unos ~10 dispatches por frame escriben en la memoria del juego con STG (sus storage buffers, 7-8 por dispatch,
        pequeños, en el heap importado), el primero ~100 draws dentro del frame. Para no copiar en la CPU memoria a
        medio escribir, el resto de la lista iba a la GPU de una vez al final: la GPU esperaba a que se tradujera todo
@@ -925,6 +932,34 @@ Pendiente:
      cambia de forma medible. Memoria de video de las cascadas: 4,8 MB, 25 MB, 100 MB y, con Extreme (8192, 2026-10-23), 384 MB. Extreme mide 3,3 ms en los pases de las cascadas (Console 0,77, High 0,93, Ultra 1,41 en la misma corrida),
      sin acné ni sombras despegadas en la meseta ni en el Santuario de la Resurrección. Los perfiles de GPU dan ahora
      el tamaño del depth de cada pase (`pass: ... depth 896x896`).
+   - Pantallas anchas y campo de visión (2026-10-24, issue #65): Vídeo > Llenar pantallas anchas (`wide_view`, Sí
+     por defecto) y Vídeo > Campo de visión (`field_of_view`, 70-150 %), en Opciones del juego y en Configuración.
+     Solo ventanas más anchas que 16:9 (21:9, 32:9); las más estrechas (16:10, 4:3) siguen 16:9 con bandas: el
+     texgen de los paneles del HUD (el minimapa) no sigue una vista más alta.
+     - El mundo: `output_scale` (con `reshape`) agranda todo render target 16:9 a la forma de la ventana, y el juego
+       dibuja en ellos con sus vistas ensanchadas. `tools/patches.py` engancha las proyecciones de sead:
+       PerspectiveProjection (vtable +0x58, la carga de tan(fovy/2) y aspect en `+0xac`/`+0xb0`, site `persp_matrix`;
+       su desplazamiento `+0xb4`, `persp_matrix_offset`, que el Link del inventario usa, x / forma; y el paso pantalla
+       → cámara, vtable +0x68, `persp_unproject_x`/`_y`) y FrustumProjection (`frustum_lr0/1`, `frustum_tb0/1`).
+       `output_scale.c` `rt_persp` / `rt_frustum` / `rt_persp_offset` multiplican por la forma toda vista 16:9.
+       `proj_update` da la matriz por sucia siempre (sead la recalcula al pedirla): las capas del HUD hechas al
+       arrancar (el cursor de los menús) siguen la forma actual. Las ortográficas no se tocan (la composición de la
+       escena usa una de 1920x1080; ensancharlas desplazó el menú rápido y la carga, probado).
+     - El HUD (`exec.c` `hud_patch`, en el c3 del vertex de los draws al target final, `RS_OUT`, que empieza por una
+       matriz de perspectiva simétrica: el bloque de vértices de nn::ui2d, matriz c3[0-3], vista c3[4-6], rectángulo
+       del panel c3[33]): una capa cuya matriz el juego hizo sin sead (el cursor de selección) recibe la ensanchada;
+       un panel de una capa de 40° que cubre todo el ancho 16:9 (fundidos, el negro de la carga, el fondo borroso de
+       los menús) recibe la 16:9, que lo estira a la ventana; un panel entero fuera del 16:9 (partes del layout que en
+       la consola no se ven) no se dibuja (`hud_clip`). Los scissors parciales del target final se comprimen igual
+       (`scissor_rect`: la máscara del minimapa).
+     - Menús: con el estado de pausa 2 (páginas del menú de pausa y mapa, `framepace_menu_ui`) se presenta el centro
+       16:9 de la imagen con bandas (`OutScale.crop`), igual que en una pantalla 16:9; el menú rápido (estado 4) y la
+       pantalla de carga llenan la ventana. La pantalla de título y sus menús (`framepace_title_ui`, pantallas 1 y
+       0x38) no se ensanchan.
+     - El FOV escala solo la cámara del mundo (far 25000; HUD, modelos de menú y título tienen 10000), nunca en eventos
+       (`framepace_in_event`), con transición de 1/4 s. `SAVAGEWIND_LOG_PROJ=1` lista cada tipo de vista y los cambios
+       de FOV; `SAVAGEWIND_NO_HUD_FIX=1` quita `hud_patch`. Pruebas: `SAVAGEWIND_WINDOW_SHOT_AT=<frame>,...` guarda la
+       ventana tal cual se presenta (bandas y menús incluidos) en `build/frames/window_N.png`. Metal pasa `false`.
    - Overlay de rendimiento (F10: off, FPS, full; ajuste `perf_overlay`): FPS y ms del juego con gráfico, CPU (total
      y del juego), RAM, GPU (uso, temperatura, potencia, reloj, VRAM) por NVML, que trae el driver de NVIDIA
      (cargado en tiempo de ejecución), y en Linux amdgpu por sysfs. Temperatura de CPU: hwmon en Linux; en Windows

@@ -10,6 +10,12 @@ int framepace_target(void);
 uint64_t framepace_period_ns(void);
 // false: the game paces itself and keeps its own clock (SAVAGEWIND_FRAMEPACE=0)
 bool framepace_on(void);
+// An event is running: a cutscene, a talk, an item fanfare (the game's event manager has an active event)
+bool framepace_in_event(void);
+// The start screen or one of its menus is up (a 16:9 layout over pictures of its own)
+bool framepace_title_ui(void);
+// The pause menu's pages or the map are up (16:9 layouts that cover the whole picture)
+bool framepace_menu_ui(void);
 // present_pace: a frame was presented at t (plat_now_ns), on its pace's grid or not.
 void framepace_presented(uint64_t t, bool on_grid);
 

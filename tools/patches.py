@@ -222,6 +222,84 @@ def _vfr_ratio(gen, a):
             f'  /* {a:#x}: ldr w8, [x19, #0x78] (VFR: interval ratio) */')
 
 
+# The menus' speed (runtime/hle/framepace.c rt_gui_speed): once a frame the game stores its integer interval x 0.5 as
+# the GUI speed (the float at +0xb20 of a UI object; 1.8.2 0x700116d0e8): 1 at 30 fps, 0.5 at 60 and never lower, so
+# the menus' cursor and animations ran faster above 60 fps. The runtime gives the frame's real length instead, as Cemu's
+# FPS++ does on the Wii U (v208 0x03415afc).
+
+def _gui_speed(gen, a):
+    assert _word(gen, a) == 0xbd0b2100, hex(_word(gen, a))  # str s0, [x8, #0xb20]
+    return ('{ extern float rt_gui_speed(float); union { uint32_t u; float f; } s = { .u = (uint32_t)VS32(0) }; '
+            's.f = rt_gui_speed(s.f); ST32(c->x[8] + 0xb20, s.u); }'
+            f'  /* {a:#x}: str s0, [x8, #0xb20] (GUI speed) */')
+
+
+# Perspective projections' matrix (sead's PerspectiveProjection, its vtable +0x58; 1.8.2 0x7000da13f4): it reads
+# tan(fovy / 2) at +0xac and the aspect ratio at +0xb0 here. The runtime may change both before the matrix is built:
+# a 16:9 view widened to the window's shape (ultrawide: more to the sides, not stretched) and the field of view
+# (runtime/nvn/output_scale.c rt_persp).
+
+def _persp_matrix(gen, a):
+    assert _word(gen, a) == 0x2d558801, hex(_word(gen, a))  # ldp s1, s2, [x0, #0xac]
+    return ('{ extern void rt_persp(uint64_t, uint32_t *, uint32_t *); uint32_t t = LD32(c->x[0] + 0xac), '
+            'k = LD32(c->x[0] + 0xb0); rt_persp(c->x[0], &t, &k); c->v[1] = t; c->v[2] = k; }'
+            f'  /* {a:#x}: ldp s1, s2, [x0, #0xac] (perspective matrix: tan(fovy / 2), aspect) */')
+
+
+# Frustum projections' matrix (sead's FrustumProjection, its vtable +0x58; 1.8.2 0x7000da18d4): left / right at
+# +0xa8 / +0xac and top / bottom at +0xa0 / +0xa4, each pair loaded twice. Some HUD layers are these (the menus'
+# cursor): a 16:9 one is widened as the perspective ones are (runtime/nvn/output_scale.c rt_frustum).
+
+def _frustum_load(word, regs, what):
+    def patch(gen, a):
+        assert _word(gen, a) == word, hex(_word(gen, a))
+        r0, r1 = regs
+        k = 0 if what == 'lr' else 2
+        return ('{ extern void rt_frustum(uint64_t, float *); float f[4]; rt_frustum(c->x[0], f); '
+                f'union {{ float f; uint32_t u; }} p0 = {{ f[{k}] }}, p1 = {{ f[{k + 1}] }}; '
+                f'c->v[{r0}] = p0.u; c->v[{r1}] = p1.u; }}'
+                f'  /* {a:#x}: ldp s{r0}, s{r1}, [x0, #{0xa8 if what == "lr" else 0xa0:#x}] (frustum matrix) */')
+    return patch
+
+
+# Projections' update (sead's Projection, 1.8.2 0x7000da0e18): every getter of the matrix, the device matrix and a
+# point's projection makes the matrix again first when its dirty flag (+8) is set. It is taken as always set, so every
+# matrix follows the window's shape and the field of view now (runtime/nvn/output_scale.c rt_persp): one made before
+# the first frame, or before a change, stayed as it was (the menus' cursor is drawn by a HUD layer made at startup).
+
+def _proj_update(gen, a):
+    assert _word(gen, a) == 0x39402008, hex(_word(gen, a))  # ldrb w8, [x0, #8]
+    return f'c->x[8] = 1;  /* {a:#x}: ldrb w8, [x0, #8] (projection update: dirty, always) */'
+
+
+# ... and its load of the view's offset (+0xb4 x, +0xb8 y: a frustum moved by a fraction of its width and height; the
+# inventory's Link is drawn to the right that way), which the widened view takes as a fraction of its 16:9 part
+# (runtime/nvn/output_scale.c rt_persp_offset).
+
+def _persp_matrix_offset(gen, a):
+    assert _word(gen, a) == 0x2d569404, hex(_word(gen, a))  # ldp s4, s5, [x0, #0xb4]
+    return ('{ extern void rt_persp_offset(uint64_t, uint32_t *, uint32_t *); uint32_t x = LD32(c->x[0] + 0xb4), '
+            'y = LD32(c->x[0] + 0xb8); rt_persp_offset(c->x[0], &x, &y); c->v[4] = x; c->v[5] = y; }'
+            f'  /* {a:#x}: ldp s4, s5, [x0, #0xb4] (perspective matrix: offset) */')
+
+
+# Perspective projections' screen position to camera position (their vtable +0x68; 1.8.2 0x7000da14c0): the game
+# places some things on screen with it (the menus' cursor corners), so it takes the same widened view as the matrix.
+
+def _persp_unproject_y(gen, a):
+    assert _word(gen, a) == 0xbd40ac01, hex(_word(gen, a))  # ldr s1, [x0, #0xac]
+    return ('{ extern void rt_persp(uint64_t, uint32_t *, uint32_t *); uint32_t t = LD32(c->x[0] + 0xac), '
+            'k = LD32(c->x[0] + 0xb0); rt_persp(c->x[0], &t, &k); c->v[1] = t; }'
+            f'  /* {a:#x}: ldr s1, [x0, #0xac] (screen to camera: tan(fovy / 2)) */')
+
+
+def _persp_unproject_x(gen, a):
+    assert _word(gen, a) == 0x2d558c02, hex(_word(gen, a))  # ldp s2, s3, [x0, #0xac]
+    return ('{ extern void rt_persp(uint64_t, uint32_t *, uint32_t *); uint32_t t = LD32(c->x[0] + 0xac), '
+            'k = LD32(c->x[0] + 0xb0); rt_persp(c->x[0], &t, &k); c->v[2] = t; c->v[3] = k; }'
+            f'  /* {a:#x}: ldp s2, s3, [x0, #0xac] (screen to camera: tan(fovy / 2), aspect) */')
+
+
 # tools/game_sites.py site -> its patch
 PATCHES = {
     'pause_options_update': _pause_option_state,
@@ -241,6 +319,16 @@ PATCHES = {
     'msg_lookup': _title_msg,
     'frame_wait': _frame_wait,
     'vfr_ratio': _vfr_ratio,
+    'gui_speed': _gui_speed,
+    'persp_matrix': _persp_matrix,
+    'persp_matrix_offset': _persp_matrix_offset,
+    'persp_unproject_y': _persp_unproject_y,
+    'persp_unproject_x': _persp_unproject_x,
+    'proj_update': _proj_update,
+    'frustum_lr0': _frustum_load(0x2d550001, (1, 0), 'lr'),
+    'frustum_lr1': _frustum_load(0x2d550c02, (2, 3), 'lr'),
+    'frustum_tb0': _frustum_load(0x2d540800, (0, 2), 'tb'),
+    'frustum_tb1': _frustum_load(0x2d540c02, (2, 3), 'tb'),
 }
 
 

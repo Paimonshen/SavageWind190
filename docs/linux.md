@@ -5,11 +5,12 @@ the game itself untested on real hardware - community reports decide (see the en
 package the release AppImages.
 
 ## Running the AppImage
-    chmod +x Savage_Wind-beta_3-x86_64.AppImage
-    ./Savage_Wind-beta_3-x86_64.AppImage
+    chmod +x Savage_Wind-0.3.0-alpha.3-x86_64.AppImage
+    ./Savage_Wind-0.3.0-alpha.3-x86_64.AppImage
 
 Needs: a distribution with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch, ...), a Vulkan 1.3 driver
-(Mesa RADV / ANV / NVK / Turnip / Asahi Honeykrisp, or NVIDIA's), and on x86-64 a CPU with AVX2 (2013 or newer).
+(Mesa RADV / ANV / NVK / Turnip / Asahi Honeykrisp, or NVIDIA's), and on x86-64 a CPU with SSE4.2 (2008 or newer;
+without AVX2 / FMA the game code is built in a slower compatible mode).
 The start screen asks for the folder with your own game files and sets them up; from then on the game starts
 straight away. `--config` (`./Savage_Wind-*.AppImage --config`) opens the configuration screen: Play, Settings, the
 game files, Quit. Once the AppImage is in your applications menu (AppImageLauncher, Gear Lever, or your desktop's own
@@ -83,8 +84,9 @@ Run `./build/savagewind` from the repo root: with `extracted/` in the starting f
 everything (dev mode) instead of `~/.local/share/savagewind`.
 
 `ARCH` picks the target, separately from the OS: the generated code differs per arch (aarch64 runs the guest's
-FP/SIMD as inline asm, like Apple Silicon; x86-64 lowers it to C with `-march=x86-64-v3`, like Windows). `make gen`
-passes the matching `--simd`. A cross build (`ARCH=aarch64` on an x86-64 machine, `SYSROOT=<arm64 root filesystem>`)
+FP/SIMD as inline asm, like Apple Silicon; x86-64 lowers it to C with `-march=x86-64-v3`, like Windows, or for CPUs
+without AVX2 / FMA `GENARCH_COMPAT`'s `-march=x86-64-v2`: the start screen builds the one the CPU runs, `make` the
+`GENARCH` one). `make gen` passes the matching `--simd`. A cross build (`ARCH=aarch64` on an x86-64 machine, `SYSROOT=<arm64 root filesystem>`)
 keeps its own `generated-aarch64/` and `build/aarch64/`. The build detects whether shaderc is named
 `libshaderc.so` or `libshaderc_shared.so`; override it with `SHADERC=-l<name>` if neither is found.
 
@@ -128,7 +130,7 @@ The aarch64 AppImage is experimental: built on x86-64, only its start screen has
    A crash writes `*** signal ...` and a backtrace there; attach the whole file.
 5. **A crash backtrace with gdb** when the log's isn't enough:
 
-       ./Savage_Wind-beta_3-aarch64.AppImage --appimage-extract    # -> squashfs-root/
+       ./Savage_Wind-0.3.0-alpha.3-aarch64.AppImage --appimage-extract    # -> squashfs-root/
        cd ~/.local/share/savagewind
        gdb -batch -ex 'handle SIGSEGV nostop noprint pass' -ex run -ex 'thread apply all bt 20' \
            --args ~/squashfs-root/usr/bin/savagewind > gdb.txt 2>&1

@@ -1229,19 +1229,20 @@ static void present_locked(NvnTexture *t) {
     }
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
-        // render scale + placement in the window: runtime/nvn/output_scale.c (Video page "Upscaler"). The game keeps
-        // its own 16:9 framing, fitted into the window with bars (a widened camera needs a game-specific hook).
+        // render scale + placement in the window: runtime/nvn/output_scale.c (Video page "Upscaler"). A window that
+        // isn't 16:9 shows more of the world (Video > Fill wide screens: the game's views widened, output_scale.c
+        // rt_persp), else the game's 16:9 image fitted into it with bars.
         // Fullscreen on a size the display has no mode for (runtime/window_size.c): that size, scaled to the screen.
         OutScale os;
         int iw, ih;
         if (winsize_virtual(&iw, &ih) && (iw != (int)dw || ih != (int)dh)) {
-            output_scale(iw, ih, false, &os);
+            output_scale(iw, ih, g_settings.wide_view, &os);
             output_scale_screen(dw, dh, iw, ih, &os);
         } else {
-            output_scale(dw, dh, false, &os);
+            output_scale(dw, dh, g_settings.wide_view, &os);
         }
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh;
-        float crop[4] = {0, 0, 1, 1};  // uv origin and size: the whole image
+        float crop[4] = {(float)os.crop[0], (float)os.crop[1], (float)os.crop[2], (float)os.crop[3]};  // (uv origin, size)
         renderer_set_scale((float)sx, (float)sy);
         renderer_set_scene_scale((float)os.scene_sx, (float)os.scene_sy);
         renderer_set_shadow_size(shadow_map_size(total_frames + 1));
@@ -1258,7 +1259,22 @@ static void present_locked(NvnTexture *t) {
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("SAVAGEWIND_WINDOW_SHOT") ? atol(getenv("SAVAGEWIND_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)total_frames + 1 == win_shot;
-        vk_frame_end(shot ? "build/window.png" : NULL);
+        // SAVAGEWIND_WINDOW_SHOT_AT=<frame>,... (ascending, counted as SAVAGEWIND_SHOT_AT): the window as presented
+        // (bars and menus included) -> build/frames/window_N.png
+        static const char *wnext;
+        static int winit;
+        char wpath[256] = "";
+        if (!winit) { winit = 1; wnext = getenv("SAVAGEWIND_WINDOW_SHOT_AT"); if (wnext) mkdir("build/frames", 0755); }
+        if (wnext && *wnext && !shot) {
+            extern uint64_t framepace_script_frame(uint64_t presented);
+            long at = strtol(wnext, NULL, 10);
+            if ((long)framepace_script_frame(total_frames + 1) >= at) {
+                snprintf(wpath, sizeof wpath, "build/frames/window_%05ld.png", at);
+                while (*wnext && *wnext != ',') wnext++;
+                if (*wnext == ',') wnext++;
+            }
+        }
+        vk_frame_end(shot ? "build/window.png" : wpath[0] ? wpath : NULL);
         if (shot && getenv("SAVAGEWIND_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();

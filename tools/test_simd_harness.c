@@ -8,7 +8,7 @@
 #include <sys/mman.h>
 #endif
 
-#include "cpu.h"
+#include "simd.h"
 
 extern GuestFn tests[];
 extern int ntests;
@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
         memcpy(c.x, in.x, sizeof c.x);
         c.sp = in.sp;
         c.nzcv = in.nzcv;
-        c.fpcr = in.fpcr;
+        rt_fpcr_write(&c, in.fpcr);  // (x86-64: FZ is MXCSR's DAZ / FTZ, as in the game)
         memcpy(c.v, in.v, sizeof c.v);
         c.excl_addr = ~0ull;
         tests[in.k](&c);

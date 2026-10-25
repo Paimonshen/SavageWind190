@@ -94,7 +94,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 // The version this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read it).
-#define SAVAGEWIND_VERSION "0.2.0-alpha.2"
+#define SAVAGEWIND_VERSION "0.3.0-alpha.3"
 extern "C" const char *rt_version(void) { return SAVAGEWIND_VERSION; }  // (the title screen's version line: fs.c)
 
 // ------------------------------------------------------------------ game files
@@ -232,8 +232,10 @@ static std::string check_copied_files(const std::string &root) {
 // "" = ready to play, else what is wrong
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
-    if (why.empty() && !gamelib_present(root.c_str()))  // (a library with another id: an update of Savage Wind)
-        return file_exists(root + "/" GAMELIB_NAME) ? "Game code built for another version" : "Game code not built yet";
+    if (why.empty() && !gamelib_present(root.c_str())) {  // (a library with another id: an update of Savage Wind, or
+        if (!file_exists(root + "/" GAMELIB_NAME)) return "Game code not built yet";  // a PC with another kind of CPU)
+        return gamelib_other_cpu(root.c_str()) ? "Game code built for another CPU" : "Game code built for another version";
+    }
     return why;
 }
 
@@ -318,6 +320,10 @@ static void explain_status(const std::string &st) {
         set_job("The game code was built for another version of Savage Wind", true,
                 "Savage Wind was updated: choose Set up game files to build the game code again from your copy of the "
                 "game. This takes a few minutes.");
+    else if (st == "Game code built for another CPU")  // (runtime/gamelib.h: the game folder came from another PC)
+        set_job("The game code was built for another kind of CPU", true,
+                "This PC's CPU needs the game code built for it: choose Set up game files to build it again from your "
+                "copy of the game. This takes a few minutes.");
     else if (st == "Game code not built yet")
         set_job("The game code isn't built yet", true,
                 "Choose Set up game files to build it from your copy of the game. This takes a few minutes.");
@@ -325,18 +331,19 @@ static void explain_status(const std::string &st) {
                      : version_failure(st) ? version_failure(st) : FAIL_MISSING);
 }
 
-// exefs: the folder with main and main.npdm; romfs: a folder named romfs (the game's data root). Found in the picked
-// folder or a few levels below it (extraction tools nest them).
-static bool is_romfs_name(const std::string &dir) {
+// exefs: the folder with main and main.npdm; romfs: a folder named romfs, or one holding System/Version.txt (the
+// game's data root: some tools name it after the game). Found in the picked folder or a few levels below it
+// (extraction tools nest them).
+static bool is_romfs_dir(const std::string &dir) {
     size_t sl = dir.find_last_of("/\\");
     std::string n = sl == std::string::npos ? dir : dir.substr(sl + 1);
     for (auto &ch : n) ch = (char)tolower((unsigned char)ch);
-    return n == "romfs";
+    return n == "romfs" || file_exists(dir + "/System/Version.txt");
 }
 static void find_game(const std::string &dir, int depth, std::string &exefs, std::string &romfs, bool &unusable) {
     if (depth > 4 || (!exefs.empty() && !romfs.empty())) return;
     if (exefs.empty() && file_exists(dir + "/main") && file_exists(dir + "/main.npdm")) exefs = dir;
-    if (romfs.empty() && is_romfs_name(dir)) { romfs = dir; return; }  // (not searched further: the game's own tree)
+    if (romfs.empty() && is_romfs_dir(dir)) { romfs = dir; return; }  // (not searched further: the game's own tree)
     DIR *d = opendir(dir.c_str());
     if (!d) return;
     std::vector<std::string> sub;
@@ -855,6 +862,10 @@ static void prelaunch_tab(float sc) {
             ImGui::IsKeyPressed(ImGuiKey_Escape, false))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
+    }
+    if (gamelib_compat()) {  // (runtime/gamelib.h: built for CPUs without AVX2 / FMA)
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", tr("Game code: compatible mode (this CPU has no AVX2 / FMA), slower"));
     }
     ImGui::Spacing();
     ImGui::Spacing();

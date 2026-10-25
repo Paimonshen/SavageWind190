@@ -1,8 +1,8 @@
 // Fuzz test for the Maxwell shader translator (runtime/nvn/maxwell/translate.c).
 //
-//  1. MSL must not change: every program is translated by the current translate.c (key.glsl = 0) and by the
-//     reference MSL-only translator (an older translate.c compiled with old_* symbol names, see
-//     tools/test_translate.sh); the MSL text and all ShaderInfo fields must be identical.
+//  1. MSL must not change (built with MSL_REF only): every program is translated by the current translate.c
+//     (key.glsl = 0) and by a reference MSL-only translator (an older translate.c compiled with old_* symbol names,
+//     see tools/test_translate.sh); the MSL text and all ShaderInfo fields must be identical.
 //  2. GLSL must compile: the same program with key.glsl = 1 is compiled in-process with shaderc (Vulkan 1.3) and
 //     the SPIR-V validated with SPIRV-Tools.
 //
@@ -24,10 +24,12 @@
 #include <spirv-tools/libspirv.h>
 #endif
 
+#ifdef MSL_REF
 // the reference translator (same ShaderKey prefix and ShaderInfo layout)
 ShaderInfo *old_maxwell_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
 void old_maxwell_free(ShaderInfo *s);
 extern uint64_t old_maxwell_gmem_base, old_maxwell_gmem_size;
+#endif
 
 static uint64_t rng_state, g_seed;
 static uint64_t rnd64(void) {  // splitmix64
@@ -180,6 +182,7 @@ static void gen_key(ShaderKey *k, int stage) {
     if (stage == STAGE_FRAGMENT && rnd(2)) k->vs_out_mask = (uint32_t)rnd64();
 }
 
+#ifdef MSL_REF
 static bool same_info(const ShaderInfo *a, const ShaderInfo *b) {
     if ((a->msl == NULL) != (b->msl == NULL)) return false;
     if (a->msl && strcmp(a->msl, b->msl)) return false;
@@ -187,6 +190,7 @@ static bool same_info(const ShaderInfo *a, const ShaderInfo *b) {
     x.msl = y.msl = NULL;
     return !memcmp(&x, &y, sizeof x);
 }
+#endif
 
 static void dump(const char *dir, const char *tag, long n, const char *src, const char *err, const uint8_t *prog, size_t len) {
     if (!dir) return;
@@ -212,8 +216,14 @@ int main(int argc, char **argv) {
     const char *mode = argc > 4 ? argv[4] : "both";
     const char *dir = argc > 5 ? argv[5] : NULL;
     bool do_msl = strcmp(mode, "glsl") != 0, do_glsl = strcmp(mode, "msl") != 0;
-    maxwell_gmem_base = old_maxwell_gmem_base = 0x80000000ull;
-    maxwell_gmem_size = old_maxwell_gmem_size = 0x10000000ull;
+    maxwell_gmem_base = 0x80000000ull;
+    maxwell_gmem_size = 0x10000000ull;
+#ifdef MSL_REF
+    old_maxwell_gmem_base = maxwell_gmem_base;
+    old_maxwell_gmem_size = maxwell_gmem_size;
+#else
+    if (do_msl) { fprintf(stderr, "built without MSL_REF: glsl mode only\n"); do_msl = false; }
+#endif
 #ifdef WITH_GLSL
     shaderc_compiler_t comp = shaderc_compiler_initialize();
     shaderc_compile_options_t opt = shaderc_compile_options_initialize();
@@ -237,15 +247,17 @@ int main(int argc, char **argv) {
         bool msl_good = true;
         if (do_msl) {
             ShaderInfo *a = maxwell_translate(prog, len, stage, &key);
+#ifdef MSL_REF
             ShaderInfo *b = old_maxwell_translate(prog, len, stage, &key);
             if (!same_info(a, b)) {
                 if (msl_diff < 20) dump(dir, "msl_diff", n, a->msl, b->msl, prog, len);
                 msl_diff++;
             }
+            old_maxwell_free(b);
+#endif
             if (a->msl) msl_ok++; else msl_fail++;
             msl_good = a->msl != NULL;
             maxwell_free(a);
-            old_maxwell_free(b);
         }
 #ifdef WITH_GLSL
         if (do_glsl) {
