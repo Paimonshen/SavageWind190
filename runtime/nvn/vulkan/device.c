@@ -1423,7 +1423,12 @@ static void present_locked(NvnTexture *t) {
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
     if (fps_iv < 0) fps_iv = getenv("SAVAGEWIND_FPS_INTERVAL") ? atof(getenv("SAVAGEWIND_FPS_INTERVAL")) : 2.0;
-    if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
+    if (prev_present > 0) {  // (debug: the cadence of long present gaps, with frame numbers)
+        double gap = now - prev_present;
+        if (gap > 0.100) LOG("[vk] present gap %.0fms at t=%.1f frame %llu\n", gap * 1000.0, now,
+                             (unsigned long long)total_frames);
+        if (gap > max_gap) max_gap = gap;
+    }
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
         if (last_fps_time > 0)

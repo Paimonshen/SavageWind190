@@ -16,6 +16,7 @@
 #include "../hle.h"
 #include "../ipc.h"
 #include "../language.h"
+#include "../platform.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
 #define FS_PATH_EXISTS MAKE_RESULT(2, 2)
@@ -559,7 +560,14 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
         if (size > b->size) size = b->size;
         kernel_watch_write("romfs read", b->addr, size);
+        uint64_t rt0 = plat_now_ns();
         ssize_t n = romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
+        double rms = (plat_now_ns() - rt0) / 1e6;
+        if (rms > 50) {  // (debug: what a long present gap was waiting on)
+            const char *rp = romfs_file_at(off);
+            LOG("[fs] slow read %.0fms %lluKB at %llx (%s)\n", rms, (unsigned long long)(size >> 10),
+                (unsigned long long)off, rp ? rp : "?");
+        }
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
         {
             const char *path = romfs_file_at(off);
