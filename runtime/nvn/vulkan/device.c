@@ -697,7 +697,9 @@ static const char *present_mode_name(VkPresentModeKHR m) {
 }
 
 // The wanted mode, or what comes closest on this surface: Adaptive -> On, Off -> Fast (no waiting either), Fast -> On
-// (FIFO is always there). *have: the surface's modes, for the log.
+// or Immediate (surfaces without mailbox — Intel's have fifo and immediate — must not land on FIFO: it would queue
+// every present on the display's refresh and fight framepace's own pacing; 120 on a 160 Hz display then judders,
+// one long wait every few seconds). *have: the surface's modes, for the log.
 static VkPresentModeKHR present_mode(char *have, size_t cap) {
     uint32_t n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, NULL);
@@ -708,13 +710,22 @@ static VkPresentModeKHR present_mode(char *have, size_t cap) {
     have[0] = 0;
     for (uint32_t i = 0; i < n && k < cap; i++)
         k += (size_t)snprintf(have + k, cap - k, "%s%s", i ? ", " : "", present_mode_name(m[i]));
-    for (VkPresentModeKHR want = wanted_present_mode();;) {
+    // (VkPresentModeKHR is an enum whose IMMEDIATE is 0: the terminator cannot be 0)
+    static const VkPresentModeKHR NONE = (VkPresentModeKHR)-1;
+    static const VkPresentModeKHR pref[VSYNC_COUNT][3] = {
+        {VK_PRESENT_MODE_FIFO_KHR, NONE, NONE},                               // on
+        {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR, NONE},   // fast: nothing queued behind vsync
+        {VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_FIFO_KHR, NONE},   // adaptive -> on
+        {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, NONE}};  // off -> fast
+    const char *env = getenv("SAVAGEWIND_VK_PRESENT");
+    VkPresentModeKHR forced = wanted_present_mode();
+    const VkPresentModeKHR one_shot[2] = {forced, NONE};  // the env override is a single mode, FIFO behind it
+    int v = g_settings.vsync;
+    const VkPresentModeKHR *ladder = (env && *env) ? one_shot : pref[v >= 0 && v < VSYNC_COUNT ? v : VSYNC_DEFAULT];
+    for (int j = 0; ladder[j] != NONE; j++)
         for (uint32_t i = 0; i < n; i++)
-            if (m[i] == want) return want;
-        if (want == VK_PRESENT_MODE_IMMEDIATE_KHR) want = VK_PRESENT_MODE_MAILBOX_KHR;
-        else if (want == VK_PRESENT_MODE_FIFO_KHR) return want;
-        else want = VK_PRESENT_MODE_FIFO_KHR;
-    }
+            if (m[i] == ladder[j]) return ladder[j];
+    return VK_PRESENT_MODE_FIFO_KHR;  // the one every surface has
 }
 
 static void create_swapchain(void) {
