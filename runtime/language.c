@@ -31,8 +31,8 @@ const TextLanguage g_text_languages[] = {
     {"Portuguese (Brazil)", "pt-BR", "USpt"},
     {"Japanese", "ja", "JPja"},
     {"Korean", "ko", "KRko"},
-    {"Chinese (Simplified)", "zh-CN", "CNzh"},
-    {"Chinese (Traditional)", "zh-TW", "TWzh"},
+    {"Chinese (Simplified)", "zh-Hans", "CNzh"},   // the game maps the Nintendo language codes
+    {"Chinese (Traditional)", "zh-Hant", "TWzh"},   // (zh-Hans/zh-Hant); zh-CN/zh-TW land on its JPja fallback
     {"Thai", "th", "THth"},  // (1.9.0 on: language_text_count; last, so the others keep their place)
 };
 const int g_ntext_languages = sizeof g_text_languages / sizeof g_text_languages[0];
