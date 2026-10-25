@@ -177,6 +177,9 @@ static void nvml_sample(PerfStats *s) {
 // gpu_pct sums the 3D engine instances (what Task Manager's 3D graph shows); the name is the Vulkan
 // device's (perfmon_set_gpu_hint). Fill in what NVML left at -1 only.
 #include <pdh.h>
+#ifndef PDH_MORE_DATA  // mingw's pdh.h lacks it; PDH returns its own HRESULT, not ERROR_MORE_DATA
+#define PDH_MORE_DATA ((PDH_STATUS)0x800007D2)
+#endif
 static struct { PDH_HQUERY q; PDH_HCOUNTER eng, mem; bool tried, ok, mem_ok; } wp;
 
 static void pdh_open(void) {
@@ -193,21 +196,36 @@ static void pdh_sample(PerfStats *s) {
     if (!wp.tried) pdh_open();
     if (!wp.ok || nv.ok) return;  // NVML above is the richer source when it is there
     if (g_gpu_hint[0] && s->gpu_name[0] == 0) snprintf(s->gpu_name, sizeof s->gpu_name, "%s", g_gpu_hint);
-    if (PdhCollectQueryData(wp.q) != ERROR_SUCCESS) return;
+    PDH_STATUS cst = PdhCollectQueryData(wp.q);
+    static bool diag;
+    if (!diag && cst != ERROR_SUCCESS) { diag = true; LOG("[perf] PDH collect failed: %lx\n", (unsigned long)cst); }
+    if (cst != ERROR_SUCCESS) return;
     DWORD need = 0, n = 0;
-    if (PdhGetFormattedCounterArrayA(wp.eng, PDH_FMT_DOUBLE, &need, &n, NULL) == ERROR_MORE_DATA) {
-        PDH_FMT_COUNTERVALUE_ITEM_A *items = malloc(need);
-        if (items && PdhGetFormattedCounterArrayA(wp.eng, PDH_FMT_DOUBLE, &need, &n, items) == ERROR_SUCCESS) {
-            double sum = 0;
-            for (DWORD i = 0; i < n; i++)
-                if (strstr(items[i].szName, "engtype_3D")) sum += items[i].FmtValue.doubleValue;
-            s->gpu_pct = (float)(sum > 100 ? 100 : sum);
-        }
-        free(items);
+    PDH_STATUS ast = PdhGetFormattedCounterArrayA(wp.eng, PDH_FMT_DOUBLE, &need, &n, NULL);
+    if (ast != PDH_MORE_DATA) {
+        if (!diag) { diag = true; LOG("[perf] PDH engine array probe: %lx\n", (unsigned long)ast); }
+        return;
     }
+    PDH_FMT_COUNTERVALUE_ITEM_A *items = malloc(need);
+    bool got = items && PdhGetFormattedCounterArrayA(wp.eng, PDH_FMT_DOUBLE, &need, &n, items) == ERROR_SUCCESS;
+    if (!got) {
+        if (!diag) { diag = true; LOG("[perf] PDH engine array failed: %lx\n", (unsigned long)ast); }
+        free(items);
+        return;
+    }
+    double sum = 0;
+    for (DWORD i = 0; i < n; i++)
+        if (strstr(items[i].szName, "engtype_3D")) sum += items[i].FmtValue.doubleValue;
+    if (!diag) {  // one diagnostic line: how many engine instances, and what they look like
+        diag = true;
+        LOG("[perf] PDH %lu engine instances; e.g. \"%s\"; 3D sum %.1f\n", (unsigned long)n,
+            n ? items[0].szName : "(none)", sum);
+    }
+    s->gpu_pct = (float)(sum > 100 ? 100 : sum);
+    free(items);
     if (wp.mem_ok) {
         need = n = 0;
-        if (PdhGetFormattedCounterArrayA(wp.mem, PDH_FMT_LARGE, &need, &n, NULL) == ERROR_MORE_DATA) {
+        if (PdhGetFormattedCounterArrayA(wp.mem, PDH_FMT_LARGE, &need, &n, NULL) == PDH_MORE_DATA) {
             PDH_FMT_COUNTERVALUE_ITEM_A *items = malloc(need);
             if (items && PdhGetFormattedCounterArrayA(wp.mem, PDH_FMT_LARGE, &need, &n, items) == ERROR_SUCCESS) {
                 long long bytes = 0;
