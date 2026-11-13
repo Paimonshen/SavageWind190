@@ -1,0 +1,30 @@
+# Pull requests from forks opened against main are moved to test, where all work lands before a release.
+# Branches of this repository (a release from test, a hotfix) keep main. Runs as pull_request_target to be allowed to
+# change the base, so it only calls the API: the pull request's code is never checked out or run.
+name: Retarget pull requests to test
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  retarget:
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            await github.rest.pulls.update({ owner, repo, pull_number: pr.number, base: 'test' });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: pr.number,
+              body: 'Thanks for the pull request! It was opened against `main`, which only moves for a release, so ' +
+                    'it now targets `test`, where all work lands first (see CONTRIBUTING.md). If GitHub shows ' +
+                    'conflicts or unrelated commits now, please rebase your branch onto the latest `test`.',
+            });

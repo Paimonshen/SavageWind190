@@ -5,6 +5,8 @@
 #include "../framepace.h"
 #include "../game_sites.h"
 #include "../kernel.h"
+#include "../platform.h"
+#include "../prof.h"
 #include "../perfmon.h"
 #include "nvn.h"
 
@@ -222,7 +224,11 @@ static void qop_run(const QOp *o) {
 
 static void *queue_thread(void *arg) {
     (void)arg;
+    prof_thread_name("nvn-queue");
+    plat_thread_elevate();
     kernel_sample_host_thread();
+    extern void control_prof_thread(const char *name);  // runtime/control_prof.c (`threads`)
+    control_prof_thread("render");
     pthread_mutex_lock(&g_q_lock);
     for (;;) {
         while (g_q_done == g_q_put) pthread_cond_wait(&g_q_work, &g_q_lock);
@@ -282,6 +288,7 @@ static void queue_wait(uint64_t k) {
 void nvn_queue_idle(void) { if (async_exec()) queue_wait(~0ull); }  // (runtime/main.c reboot: guest threads stopped)
 
 NVN(nvnQueueSubmitCommands) {
+    SW_ZONE("nvnQueueSubmitCommands");
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
     TL("submit %d lists (lr %llx)", n, (unsigned long long)c->x[30]);
@@ -341,6 +348,7 @@ NVN(nvnSyncFinalize) {
 NVN(nvnSyncSetDebugLabel) { (void)c; }
 void renderer_flush(void);
 NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
+    SW_ZONE("nvnSyncWait");
     static int flush = -1;
     static uint64_t n;
     if (flush < 0) flush = getenv("SAVAGEWIND_SYNC_FLUSH") ? 1 : 0;
@@ -629,6 +637,62 @@ static bool tex_set_has(uintptr_t p) {  // (lock held)
     return false;
 }
 
+// Host textures by what they are (texture_key): BOTW initializes ~90 NVNtexture objects a frame again with what they
+// held the frame before (the exposure chain, the post-process steps). Each one got a new host object that only a
+// reboot frees: ~20 KB a frame, GBs after hours without a frame-rate limit (#102). One initialized like an existing
+// one is that one: same memory, same shape, so commands recorded with either read the same thing.
+// SAVAGEWIND_NO_TEXTURE_REUSE=1: a new host object every time, as before.
+typedef struct {
+    TexLayout layout;
+    uint32_t target, format, flags, width, height, depth, levels, samples, ds_mode;
+    uint8_t swizzle[4];
+    uint64_t stride, addr, pool_offset;
+    NvnPool *pool;
+} TexKey;
+static NvnTexture **g_tex_by_key;
+static uint32_t g_key_cap, g_key_n;
+static void texture_key(const NvnTexture *t, TexKey *k) {
+    memset(k, 0, sizeof *k);  // (the padding too: keys are compared whole)
+    k->layout = t->layout;
+    k->target = t->target, k->format = t->format, k->flags = t->flags, k->width = t->width, k->height = t->height;
+    k->depth = t->depth, k->levels = t->levels, k->samples = t->samples, k->ds_mode = t->ds_mode;
+    memcpy(k->swizzle, t->swizzle, 4);
+    k->stride = t->stride, k->addr = t->addr, k->pool_offset = t->pool_offset, k->pool = t->pool;
+}
+static uint32_t key_slot(const TexKey *k) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < sizeof *k; i++) h = (h ^ ((const uint8_t *)k)[i]) * 0x100000001b3ull;
+    return (uint32_t)(h >> 32) & (g_key_cap - 1);
+}
+static void key_put(NvnTexture *t) {  // (lock held)
+    if ((g_key_n + 1) * 2 > g_key_cap) {
+        NvnTexture **old = g_tex_by_key;
+        uint32_t oc = g_key_cap;
+        g_key_cap = g_key_cap ? g_key_cap * 2 : 4096;
+        g_tex_by_key = calloc(g_key_cap, sizeof *g_tex_by_key);
+        g_key_n = 0;
+        for (uint32_t i = 0; i < oc; i++)
+            if (old[i]) key_put(old[i]);
+        free(old);
+    }
+    TexKey k;
+    texture_key(t, &k);
+    uint32_t i = key_slot(&k);
+    while (g_tex_by_key[i]) i = (i + 1) & (g_key_cap - 1);
+    g_tex_by_key[i] = t;
+    g_key_n++;
+}
+static NvnTexture *key_find(const NvnTexture *t) {  // (lock held)
+    if (!g_key_cap) return NULL;
+    TexKey k, o;
+    texture_key(t, &k);
+    for (uint32_t i = key_slot(&k); g_tex_by_key[i]; i = (i + 1) & (g_key_cap - 1)) {
+        texture_key(g_tex_by_key[i], &o);
+        if (!memcmp(&k, &o, sizeof k)) return g_tex_by_key[i];
+    }
+    return NULL;
+}
+
 // (debugging) log the textures whose storage holds guest address a
 void nvn_debug_textures_at(uint64_t a) {
     pthread_mutex_lock(&g_tex_lock);
@@ -649,8 +713,11 @@ void nvn_debug_textures_at(uint64_t a) {
 RT_ON_RESET(tex_set_reset) {  // (after the renderer's reset: no image is left)
     for (uint32_t i = 0; i < g_tex_cap; i++) free((void *)g_tex_set[i]);
     free(g_tex_set);
+    free(g_tex_by_key);
     g_tex_set = NULL;
+    g_tex_by_key = NULL;
     g_tex_cap = g_tex_n = 0;
+    g_key_cap = g_key_n = 0;
 }
 
 NVN(nvnTextureInitialize) {
@@ -658,8 +725,18 @@ NVN(nvnTextureInitialize) {
     if (t->flags & 2)
         LOG("[nvn] video texture %p: %ux%u fmt %#x flags %#x target %u addr %llx stride %llu\n", t, t->width, t->height,
             t->format, t->flags, t->target, t->addr, t->stride);
+    static int same = -1;
+    if (same < 0) same = getenv("SAVAGEWIND_NO_TEXTURE_REUSE") == NULL;
     pthread_mutex_lock(&g_tex_lock);
-    tex_set_put((uintptr_t)t);
+    NvnTexture *had = same ? key_find(t) : NULL;
+    if (had) {
+        free(t);
+        t = had;
+        t->finalized = false;  // (initialized again: finalizing it is the game's to do once more)
+    } else {
+        tex_set_put((uintptr_t)t);
+        if (same) key_put(t);
+    }
     pthread_mutex_unlock(&g_tex_lock);
     SET_HOST(A(0), t);
     RET(1);
@@ -681,7 +758,7 @@ NvnTexture *nvn_texture_host(uint64_t guest) {
 // Only the renderer's image goes; the host object stays, and so does the guest object's pointer to it. BOTW copies
 // NVNtexture objects and finalizes one copy while it keeps drawing with another, and keeps texture pool entries
 // registered with finalized textures: on hardware those just go on reading the texture's memory. (A texture
-// initialized again in the same object gets a new host object.)
+// initialized again in the same object gets a new host object, or the one initialized like it before: texture_key.)
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
     if (!t) return;
@@ -975,7 +1052,7 @@ NVN(nvnSamplerPoolRegisterSampler) {
     int id = (int)A(1);
     if (id >= 0 && id < d->count && HOST(NvnSamplerDesc, A(2))) {
         NvnSamplerDesc s = *HOST(NvnSamplerDesc, A(2));
-        s.backend = NULL;  // (the pool entry gets its own VkSampler)
+        s.backend = s.backend_plain = NULL;  // (the pool entry gets its own VkSamplers)
         ((NvnSamplerDesc *)d->entries)[id] = s;
     }
 }
@@ -1125,6 +1202,7 @@ NVN(nvnQueueAcquireTexture) {
 // SAVAGEWIND_FPS_CAP allows (default 60; 0 = no cap).
 uint64_t g_pace_sleep_ns;  // (VK_PROF hitch lines) time present_pace slept
 static void present_pace(int interval) {
+    SW_ZONE("present pace");
     static int cap = -1;
     static uint64_t last;
     if (cap < 0) cap = getenv("SAVAGEWIND_FPS_CAP") ? atoi(getenv("SAVAGEWIND_FPS_CAP")) : 60;
@@ -1145,6 +1223,7 @@ static void present_pace(int interval) {
 }
 
 NVN(nvnQueuePresentTexture) {
+    SW_ZONE("nvnQueuePresentTexture");
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
     static int logged = -1;

@@ -26,9 +26,9 @@ static void am_init_once(void) {
     if (msg_event) return;
     msg_event = kernel_create_event_pair(&msg_event_w, &msg_event_r);
     msg_queue[msg_count++] = 15;  // FocusStateChanged
-    pthread_mutex_lock(&g_klock);
+    klock();
     kernel_signal(msg_event);
-    pthread_mutex_unlock(&g_klock);
+    kunlock();
 }
 
 static uint32_t new_event(void) {
@@ -41,9 +41,9 @@ static uint32_t new_event(void) {
 static uint32_t new_signaled_event(void) {
     uint32_t w, r;
     KEvent *ev = kernel_create_event_pair(&w, &r);
-    pthread_mutex_lock(&g_klock);
+    klock();
     kernel_signal(ev);
-    pthread_mutex_unlock(&g_klock);
+    kunlock();
     return r;
 }
 
@@ -67,7 +67,7 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
     switch (req->cmd) {
     case 0: resp->copy_handles[resp->ncopy++] = msg_event_r; break;  // GetEventHandle
     case 1:  // ReceiveMessage
-        pthread_mutex_lock(&g_klock);
+        klock();
         if (msg_count) {
             OUT(uint32_t, 0) = msg_queue[0];
             memmove(msg_queue, msg_queue + 1, --msg_count * sizeof(uint32_t));
@@ -76,7 +76,7 @@ static void common_state_getter(Service *s, IpcReq *req, IpcResp *resp) {
         } else {
             resp->result = AM_NO_MESSAGE;
         }
-        pthread_mutex_unlock(&g_klock);
+        kunlock();
         break;
     case 5: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;   // GetOperationMode: docked
     case 6: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetPerformanceMode: boost

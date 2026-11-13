@@ -35,6 +35,14 @@ git -c credential.helper= -c "credential.helper=!gh auth git-credential" push or
 Antes de cada publicación: `git ls-tree -r --name-only main` no debe tener archivos del juego, código generado,
 keys ni rutas personales.
 
+Issues y pull requests (#160, 2026-10-26): GitHub lee los formularios (`.github/ISSUE_TEMPLATE/`) y los workflows
+(`.github/workflows/`) de la rama por defecto, `main`, así que un cambio en ellos solo cuenta cuando llega a `main`.
+`triage.yml` etiqueta `needs-info` los bugs nuevos sin log, de una release vieja o de 1.8.2 (con un comentario que
+dice qué falta), `stale.yml` los cierra a los 7 días sin cambios y `retarget.yml` pasa a `test` las pull requests de
+forks abiertas contra `main`. Una etiqueta `triage-ok` deja un issue fuera del triage. **En cada release**: poner la
+versión nueva como "(latest)" en el desplegable "Savage Wind version" de `bug_report.yml` (el triage marca solo la
+opción "An older release").
+
 Releases: el zip de `make dist` (ver `docs/BUILD-windows.md`) se sube con `gh release create v<versión>
 --prerelease` sobre el commit de `public`. Alpha 1 (`0.1.0-alpha.1`, 2026-10-17) se probó como jugador: zip
 extraído en una carpeta nueva, PATH sin MSYS2, preparación desde la pantalla de inicio (copia, `romfs.bin`,
@@ -65,6 +73,13 @@ savage_wind/extracted/
   exefs/   main, main.npdm, rtld, sdk (y subsdk* si el juego los trae)
   romfs/   contenido completo de la romfs (base + actualización ya fusionadas)
 ```
+
+BOTW 1.8.2 y 1.9.0 traen solo `subsdk0`. Otro `subsdk1`..`subsdk9` en una ExeFS de una versión conocida es de un mod o
+de un cargador de mods copiado ahí (#165: el generador fallaba en `subsdk3`): `tools/layout.py` (`GAME_SUBSDKS`) lo
+deja fuera del código y `runtime/loader.c` lo salta con un aviso en el log. Con una versión desconocida un subsdk sin
+código sigue siendo un error ("build it again"). **Revisar al implementar el DLC o mods con código:** el DLC de BOTW es
+contenido de datos (AddOnContent, sin código), pero un mod con código (exlaunch / skyline) sí trae un subsdk; si algún
+día se soportan, `GAME_SUBSDKS` y el salto del loader tienen que dejarlos pasar.
 
 La versión principal y la única con soporte es la 1.9.0 (2026-02-17, v1114112: texto en tailandés en Switch 2,
 SDK 21.4.1), la última: un dump legal hecho hoy la trae. La 1.8.2 (versión de título v1048576) se sigue instalando y
@@ -194,6 +209,9 @@ Pendiente:
        `SFCI`, y la respuesta lleva el resultado como primera palabra, sin `SFCO` ni alineación.
      - `romfs.bin`: el runtime lee la RomFS desde esa imagen, que arma la pantalla de setup. Para
        desarrollo sin launcher: `build/savagewind.exe extracted --build-romfs` (4,5 min, 15,1 GB).
+       Desde #99 ya no hay imagen en disco: `runtime/romfs_image.c` la sirve desde `extracted/romfs/` (cabecera
+       y tablas en memoria, los datos de cada fichero leídos del suyo) y la pantalla de inicio borra el
+       `romfs.bin` de versiones anteriores. `--dump-romfs <fichero>` escribe la imagen para compararla.
      - `IApplicationFunctions` 210 (`GetHealthWarningDisappearedSystemEvent`): el juego espera ese evento
        antes del primer frame; el stub no devolvía handle y el juego sondeaba el handle 0 para siempre.
        Ahora devuelve un evento ya señalado.
@@ -309,7 +327,36 @@ Pendiente:
      el ratón como cámara: con la ventana enfocada, sin menú y sin script, el cursor queda retenido (modo relativo de
      SDL) y su velocidad se vuelve el stick derecho (≈1200 px/s a fondo con sensibilidad 1, más un 12% para pasar la
      zona muerta del juego; `SAVAGEWIND_MOUSE_SCALE`, `SAVAGEWIND_MOUSE_DEADZONE`). Esc suelta el cursor y un clic
+     en la ventana lo vuelve a retener. Ajustes: `mouse_camera`, `mouse_sensitivity`, `mouse_vertical_sensitivity`
+     (el eje vertical, en fracción de la sensibilidad: 0,5 a 2) y `mouse_invert_y`.
      en la ventana lo vuelve a retener. Ajustes: `mouse_camera`, `mouse_sensitivity`, `mouse_invert_y`.
+   - Ratón como cámara, nativo (2026-10-25, `runtime/hle/input.c`, `tools/patches.py` `_cam_*`): el ratón ya no
+     pasa por el stick. Las cámaras son acciones de IA del actor `GameRomCamera` (`CameraChase`, `CameraAiming`,
+     `CameraHorse`...; sus fábricas se registran por el CRC32 del nombre) y todas leen el stick derecho con una
+     sola función (1.9.0 `0x7000d57fe0`): lee `+0x128` del mando, aplica una zona muerta, eleva la inclinación al
+     cuadrado (`v |v|`) y la deja en el círculo unidad. Giran eso × sus velocidades (`latStickScale` /
+     `lngStickScale` del AIProgram; la velocidad de cámara del juego, el flag `StickSensitivity`: 0.8..2.4, 1.6 por
+     defecto; ×1.78 en horizontal) × la duración del frame (VFR). Las de tipo chase (`CameraChase`,
+     `CameraShieldSurfing`, `CameraWakeboard`) elevan además la parte vertical al cuadrado (`y |y|`). Con el ratón
+     como stick eso daba una cámara que apenas se movía con movimientos lentos, se aceleraba con los rápidos y tenía
+     velocidad máxima. Ahora, mientras el ratón tiene la cámara, el runtime responde esa función (`rt_cam_stick`):
+     el movimiento del ratón en el frame (tomado en `rt_vfr_update`) en grados, 0.022 por cuenta × la sensibilidad
+     (como Quake y Source), entre el giro de una inclinación completa en ese frame; ni recortado ni curvado. La parte
+     vertical lleva ×1.78, en las chase se salta el cuadrado (`rt_cam_pitch`) y en `CameraAiming` / `CameraAiming2`
+     usa la escala de la horizontal (`rt_cam_pitch_scale`), así que los dos ejes giran igual. Medido con
+     `SAVAGEWIND_HOST_INPUT` ("frame:mouse:dx/dy:frames") y `SAVAGEWIND_MOUSE_LOG`: 600 cuentas al 100% giran
+     13.20° en yaw y en pitch, a 30 y a 60 fps; 400 cuentas en un frame, 8.80° (un stick a fondo da 2.85° por frame
+     a 30 fps); con el arco, 0.308° por cada 20 cuentas en los dos ejes (su `lngStickScale` 0.7). Lo que la imagen
+     se sigue moviendo al soltar con el arco es el rig de la cámara siguiendo la pose de Link: los ángulos de
+     `CameraAiming` se paran en el mismo frame (`SAVAGEWIND_MOUSE_LOG_X19`), y con el stick pasa igual. Las opciones
+     Camera X-axis / Y-axis (Inverted) del juego las aplica el mando de las cámaras (el id 3 del gestor de mandos,
+     un envoltorio que guarda `objeto + 8` en la lista): cada frame lee `CameraRLReverse` / `CameraUpDownReverse` y le
+     da la vuelta a ese eje de su stick derecho. El ratón no pasa por él, así que `_cam_reverse` le pasa los flags al
+     runtime (`rt_cam_reverse`) y este le da la vuelta igual a su movimiento: con las dos en Inverted (en una copia
+     de `option.sav`) el ratón gira +4.40° / −4.40° en vez de −4.40° / +4.40°, como hacía al pasar por el stick.
+     Los sitios son opcionales (`OPTIONAL_GROUPS` en `tools/game_sites.py`): si en una versión un patrón no encuentra
+     su sitio, el grupo entero queda fuera y el ratón vuelve a mover el stick (sin el segundo grupo, solo pierde las
+     opciones de inversión del juego). `SAVAGEWIND_MOUSE_NATIVE=0` también vuelve al stick.
    - Controles de movimiento (2026-10-22, `runtime/hle/motion.c`): BOTW importa cuatro funciones del sensor de seis
      ejes de nn::hid: `GetSixAxisSensorHandles` y `StartSixAxisSensor` (cuando cambia el estilo del mando,
      `FUN_7100d9e24c`), `GetSixAxisSensorStates` (cada frame, las 16 muestras más nuevas de cada handle) y
@@ -331,7 +378,13 @@ Pendiente:
      es el giro desde la anterior, así que todo concuerda con la dirección. Ajustes: `motion_sensitivity`,
      `motion_invert` (`off`, `up_down`, `left_right`, `both`); la opción del juego "Controles por movimiento" pasa a
      la página Controles. Pruebas: `SAVAGEWIND_INPUT` acepta `TILT_UP/DOWN/LEFT/RIGHT` y
-     `TURN_UP/DOWN/LEFT/RIGHT`; `SAVAGEWIND_MOTION_LOG=1` registra la orientación una vez por segundo.
+     `TURN_UP/DOWN/LEFT/RIGHT`; `SAVAGEWIND_MOTION_LOG=1` registra la orientación una vez por segundo, con la salud del
+     flujo del sensor (lecturas por segundo, fusionadas, con reloj del sensor quieto o a saltos, el hueco más largo) y cuántas veces lo leyó el juego, y el encendido y apagado de la vibración. Siempre (unas pocas
+     líneas como mucho): de dónde sale el movimiento cuando cambia, los huecos del flujo de más de 0,25 s y un reloj del
+     sensor que se queda quieto o salta. Ese reloj (el timestamp del sensor de SDL) da el tiempo de cada lectura; un mando
+     que se hace pasar por DualShock 4 puede dejarlo quieto o hacerlo saltar, y cada lectura se descartaba (0 s o un
+     tercio de segundo desde la anterior): el apuntado se quedaba quieto aunque las lecturas siguieran llegando (sospecha en #220). Ahora una
+     lectura sin tiempo usable cuenta como un periodo de muestreo (la frecuencia que da SDL).
    - Iconos de botones (2026-10-22, `runtime/nvn/glyphs.c`): BOTW dibuja los botones de sus avisos (HUD, menús,
      diálogos) como caracteres de su propia fuente de mapa de bits `External_00.bffnt` (en `Font/Font_*.sbfarc`,
      igual en todas las regiones): 51 glifos en U+E040..E091, celdas de 50x50 (a 51 px) en una hoja BC4 de 256x1024
@@ -372,7 +425,9 @@ Pendiente:
        medio escribir y la GPU fallaba con una escritura inválida (device lost en ~1 de cada 7 cargas del mundo).
      - `vkQueuePresentKHR` (NVIDIA, Windows, en ventana) espera a que la GPU termine el frame: 13-18 ms en uno de cada
        cinco. Ahora presenta un hilo propio con una segunda cola de la misma familia (`SAVAGEWIND_VK_PRESENT_THREAD=0`
-       presenta en el hilo que llama).
+       presenta en el hilo que llama). En NVIDIA antes de Turing (device id < 0x1E00: GTX 10 y anteriores) la GPU
+       escribía en la dirección 0 en los primeros frames con la segunda cola y funcionaba sin ella (#36); ahí se crea
+       una sola cola y presenta el hilo que llama (`SAVAGEWIND_VK_PRESENT_THREAD=1` fuerza la segunda cola).
      - Shaders nuevos (compilación síncrona): la traducción Maxwell → GLSL costaba 1-4 ms por programa en el mundo.
        Ahora se guarda en memoria por etapa, binario y clave (los programas comparten shaders) y en disco
        (`cache/xlate/`, se invalida al recompilar `translate.c`); `SAVAGEWIND_NO_XLATE_CACHE=1` la desactiva y
@@ -454,7 +509,7 @@ Pendiente:
          B la para y lo hecho se queda. `savagewind --precompile-shaders` hace lo mismo sin el menú (ventana oculta
          con `SAVAGEWIND_HIDDEN=1`); `savagewind --scan-shaders` solo cuenta lo que encuentra y cuántos de los shaders
          del registro de claves (abajo) están entre ellos (`SAVAGEWIND_SCAN_LIST=1`: shaders por archivo).
-       - De dónde salen (`runtime/nvn/shader_archive.c`): de la RomFS del propio usuario (`romfs.bin`), en los
+       - De dónde salen (`runtime/nvn/shader_archive.c`): de la RomFS del propio usuario (`romfs/`), en los
          archivos desde los que el juego sube sus shaders a NVN: FSHA con ficheros BNSH de nn::gfx (materiales,
          terreno, hierba: `*.sbfsha`, `*.bfsha` dentro de `*.ssarc`), SHARCB de agl/gsys (`*.sharcb`: postproceso,
          sombras, luces), los efectos VFXB (`*.sesetlist`, también dentro de `*.pack` y `*.sbeventpack`) y el de las
@@ -503,6 +558,38 @@ Pendiente:
          de siempre, que sigue guardándose en ~16 ms y no en 2,6 s. Con un driver nuevo el fichero no vale y
          Configuración pide volver a hacerla. La caché de disco del propio driver no basta: con las librerías
          compiladas solo en cachés temporales, el paseo tuvo 1,8 s de compilaciones y 50 frames de más de 40 ms.
+         Se hacen las librerías de todas las claves (la predicha, las del registro que difieren y las de movimiento),
+         no solo de la predicha.
+       - Variantes de los vectores de movimiento (2026-10-28; TAA y FSR 3, `mvec.c`): con ellos, una pasada con la
+         profundidad de la escena a resolución interna lleva el target de movimiento tras sus targets (hueco = cuántos
+         tiene, `begin_pass`), y en ella un dibujo que escribe profundidad usa la variante de movimiento de su programa
+         (vértices `mvec` 1 y fragmentos `mvec_rt` hueco+1 si casa con uno del frame anterior; si no, vértices tal cual
+         y fragmentos 0x40|hueco+1, quieto) y uno con blending que no la escribe, la máscara reactiva (fragmentos
+         0x80|hueco+1). Las claves son por lo demás las del mismo dibujo sin vectores (en el registro, las 522 de
+         movimiento eran una registrada más esos campos). En BOTW las pasadas son el G-buffer (6 targets: hueco 6; sus
+         shaders de fragmentos escriben los targets 0, 1 y 3, y el 5 algunos) y la pasada forward tras la luz (1
+         target: hueco 1, efectos y materiales que solo escriben el 0). `precompile.c` (`add_mvec_jobs`) añade a cada
+         clave de fragmentos de un shader de G-buffer `mvec_rt` 7 y 0x47, `mvec` 1 a las de los shaders de vértices de
+         sus programas, y 0x82 a las de los shaders de solo target 0 de `uking_mat` y de los efectos (`*.sesetlist`);
+         las de movimiento del registro van tal cual. Son 7.467 traducciones y librerías más (1.856 shaders de
+         fragmentos de G-buffer, 1.099 de vértices, 2.656 de máscara). Sus librerías salen con el layout que pedirá el
+         juego (las de vértices de movimiento con las push constants, `stage_layouts` desde `ShaderInfo.mvec`): en la
+         prueba no faltó ninguna de las predichas salvo las de claves mal predichas sin registro (abajo).
+         `SAVAGEWIND_PRECOMPILE_NO_MVEC=1`: sin ellas; `SAVAGEWIND_LOG_LIBS=1` registra cada librería que
+         `vk_precompiled.bin` no tenía. Hasta este cambio la precompilación moría sin decir nada al empezar las
+         librerías (`vk_pso_warm_stage` sin `si`, desde 6203d7f): ni librerías ni `precompiled.txt`.
+         Medido (desde una caché vacía, sin registro de claves, 12 hilos, RTX 3060, sal de SPIR-V nueva): sin las
+         variantes 108 s, 13.997 traducciones, 13.973 librerías, 782 MB; con ellas 161 s, 21.464, 21.440, 1.179 MB
+         (SPIR-V 297 → 445 MB, traducciones 131 → 199, librerías 345 → 526). Partida oculta de save_0 a 1080p con
+         SMAA que pasa a TAA en el frame 7000 (`SAVAGEWIND_AA_AT`, `async_shaders = 0`): sin las variantes, 159
+         librerías compiladas en el momento, tirones de 1.164 y 3.226 ms (4,2 s de compilaciones) y otros tres de
+         57-74 ms; con ellas, 8 librerías (claves base mal predichas sin registro: 3 normales, 5 de movimiento),
+         tirones de 98 y 272 ms (~0,19 s de compilaciones: los ~340 enlaces y módulos nuevos; lo demás, crear lo de
+         TAA) y ninguno más. "compile N" no baja (498 frente a 494): cuenta programas y enlaces, no compilaciones del
+         driver.
+         La DLC (`aoc1`, `aoc2`) no tiene archivos de shaders (sus 23 packs no llevan ninguno; los efectos de la DLC
+         están en la RomFS base): no hace falta leerla. Tras actualizar el traductor, Configuración marca "Volver a
+         hacer" y nada la lanza sola.
        - Coste: la primera vez ~3 min (172 s: traducciones 46 s, librerías 125 s; 12 hilos, Ryzen 5 5600X, RTX
          3060); otra vez con todo hecho, ~5 s (el fichero no se reescribe si no hay nada nuevo). Disco: ~1,45 GB
          (librerías 834 MB, SPIR-V 448 MB, traducciones 137 MB, caché de pipelines 17 MB). Memoria: con
@@ -522,6 +609,56 @@ Pendiente:
        solo con traducciones y SPIR-V precompilados, eran 12,7 s de compilaciones y 51 frames de más de 40 ms. Lo que
        queda: los enlaces y el precalentamiento al cargar el mundo (~500 en los primeros 2 s) y algún enlace suelto
        de 30-70 ms.
+     - Pipelines sin tirones (2026-11-01, rama `pipelines-a5`; medidas en `issue-logs/alpha5/pipelines.md`). Dos
+       causas distintas de los tirones por pipelines que quedaban:
+       - En el PC del usuario, `vk_precompiled.bin` se rechazaba entero ("made by another shader translator build or
+         device setup"): el id del traductor llevaba pegados dos interruptores que el backend fija según el
+         dispositivo (`-gs`: memoria global en dos bindings; `-gn`: las lecturas del HUD por copias, que pasó a estar
+         activo por defecto en `exec.c` después de la precompilación), así que un cambio de política en `exec.c`, de
+         driver o de GPU tiraba las 21.440 librerías, borraba la carpeta de traducciones y cada shader nuevo volvía a
+         costar una compilación entera (~30 ms; en la partida de prueba, 412 en 2 s y frames de 307 ms). Ahora el id
+         (`maxwell_translator_id`) es solo el hash de `translate.c` y `shader.h` (`TRANSLATOR_ID`), y lo que una
+         traducción lee además del binario y la clave (`maxwell_translation_variant`: los dos interruptores y la
+         ventana del heap) se guarda en cada fichero de `cache/xlate/` (formato `SWX3`, en una carpeta nueva; la
+         anterior se borra). Solo afecta a los shaders que leen memoria global (`ShaderInfo.uses_gmem`): uno de esos
+         hecho bajo otra variante se traduce otra vez y el fichero se sustituye; el resto, la lista de pipelines y las
+         cachés de pipelines (que el driver indexa por contenido) siguen valiendo. `cache/precompiled.txt` guarda la
+         versión completa (`vk_shader_version_full`), así que Configuración ofrece "Volver a hacer" tras un cambio de
+         variante, y esa pasada solo rehace los shaders de memoria global. Los ids salen de una cabecera generada por
+         el Makefile (`build/inc/shader_ids.h`, reescrita solo cuando cambia un hash; `-include` en `translate.o` y
+         `spirv.o`), y los mensajes de rechazo distinguen "another shader translator build" de "another device
+         setup". `warm_module` aplica el mismo arreglo del blur de distancia que `stage_build`: antes esas librerías
+         precompiladas nunca coincidían con el módulo del juego.
+       - En la Steam Deck, una instalación recién hecha enlazaba 270-706 pipelines en los primeros 45 s (hasta 236 en
+         un frame de 109 ms) con las 21.440 librerías precompiladas: la lista de pipelines estaba vacía, porque la
+         precompilación hace librerías y los pipelines finales (programa + estado fijo del draw) solo se conocen
+         jugando. Ahora hay una semilla (`vk_pipelines.seed`, `precompile.c`): la lista de una partida de un
+         desarrollador en forma portable (hash del binario de cada shader, su clave y el estado fijo; nada del juego),
+         que `savagewind --export-pipeline-seed <fichero>` escribe desde la lista de una instalación y la
+         precompilación lee del data root o de junto al ejecutable: sus claves se añaden a las traducciones y al
+         final sus registros a `vk_pipelines.list`, de modo que el primer arranque precalienta como el segundo.
+         Exportar una lista de una build anterior al cambio de id: `SAVAGEWIND_SEED_LIST_ID=<id viejo con -gs/-gn>`
+         y `SAVAGEWIND_PSO_ANY_VERSION=1` (una sola vez, sobre una copia de la lista). Se envía con el juego desde el
+         2026-11-02: `runtime/nvn/vulkan/vk_pipelines.seed` (la partida al 100% del usuario, 3.993 pipelines, 102 KB:
+         hashes y estado de render, nada del juego), copiado junto al ejecutable en el zip de Windows (`make dist`) y
+         en el AppImage (`tools/linux/package.sh`); una build de fuentes lo encuentra en el checkout. Como la lista
+         se lee al crear la ventana, antes de la precompilación de la pantalla de inicio, la precompilación vuelve a
+         leerla y arranca el precalentamiento cuando la semilla ha entrado (`vk_pso_rewarm`): si no, el primer
+         arranque tras la instalación enlazaba todo en el draw y solo el siguiente precalentaba.
+       - "Shaders asíncronos" pasa a estar activado por defecto (`settings_version` 4: los ficheros de la versión 3
+         con 0 toman el nuevo valor, porque el menú escribía todas las claves). Qué se salta y qué no
+         (`draw_` en `exec.c`): un draw cuyo pipeline aún se construye se salta cuando sus targets se dibujaron en el
+         frame anterior (vuelve al siguiente), y espera si el target no se dibujó el frame anterior (`one_shot_target`:
+         la captura de la pantalla de guardado, el fondo del menú de pausa), si es un array, 3D o cubo que no sigue
+         la escala de salida (`draw_must_happen`: las teselas del terreno) y, nuevo, en todos los dispatches de
+         cómputo (lo que escriben puede leerse para siempre; son 72 shaders). Con las librerías de las dos etapas ya
+         hechas (precompiladas o de un draw anterior), el enlace se hace en el propio draw (`link_now`, sin saltarse
+         nada) hasta `SAVAGEWIND_PIPE_LINK_MS` ms por frame presentado (3 por defecto; 0: todo a los hilos) y el
+         resto va a los hilos; una librería por compilar (5-50 ms) siempre va a un hilo. La línea de estadísticas
+         añade `links now N`. La idea del salto seguro por "target dibujado el frame anterior" y el enlace en el draw
+         vienen de TotK Recomp (`TOTK_PIPE_SKIP`, `docs/architecture.md`, MIT: `third_party/totk-pc-recomp/LICENSE`),
+         escrito aquí a nuestra manera. Desactivarlo (Opciones > Shaders asíncronos, o `SAVAGEWIND_SYNC_SHADERS=1`)
+         vuelve al comportamiento de antes: cada draw espera a su shader.
      Medición: `SAVAGEWIND_VK_PROF=1 SAVAGEWIND_HITCH_MS=1` registra cada frame con su desglose (traducción, esperas a
      la GPU, compilaciones, presentación, pausa del ritmo); `SAVAGEWIND_MAX_INTERVAL=2` impide que el juego pase a 20
      FPS, así su paso por frame es fijo y un recorrido con guion sigue siempre el mismo camino (comparaciones A/B);
@@ -544,7 +681,17 @@ Pendiente:
      dividida por el factor del modo con AMD FSR 1 (Ultra calidad 1,3, Calidad 1,5, Equilibrado 1,7, Rendimiento 2). Con FSR 1 y la escena más chica que su sitio
      en la imagen final, EASU y RCAS corren sobre la escena justo antes del draw del juego que la compone
      (`exec.c` `scene_upscale`), en el formato de la escena (A2B10G10R10, sin bandas), y ese draw muestrea el
-     resultado 1:1. Por defecto el escalador está en No (en macOS sigue MetalFX); `settings_version` 3: en un
+     resultado 1:1. La escena está en luz lineal (la composición le aplica la curva de gamma: 32 → 99, 64 → 137
+     de 255, medido en el Deck), y FSR 1 espera una imagen perceptual: EASU la lleva a gamma 2.0 (raíz) al leerla,
+     RCAS la devuelve a lineal (cuadrado) al escribir (`b.z` = 1 en sus push constants;
+     `SAVAGEWIND_SCENE_FSR_LINEAR=1`: en lineal, como antes). En lineal las diferencias chicas de sombras y hojas
+     pesaban poco al elegir dirección y al recortar a los 4 vecinos, y la gamma de la composición las sacaba como
+     manchas planas (#141). Aun así Rendimiento en una ventana de 720p-800p (escena 640x360, Steam Deck) se ve
+     "al óleo": es EASU a 2x desde tan poca imagen, igual en NVIDIA (RTX 3060) que en RADV (medido 2026-10-27:
+     misma vista, mismas entradas; los shaders del Deck dan lo mismo que una referencia en CPU, diferencia media
+     0,2 de 255); Calidad (853x480) casi no lo tiene. `SAVAGEWIND_SCENE_POST_DUMP=<frame>` (contado como
+     `SAVAGEWIND_SHOT_AT`) guarda la escena, la salida de EASU y la de RCAS de ese frame en
+     `build/frames/scene_*.png`. Por defecto el escalador está en No (en macOS sigue MetalFX); `settings_version` 3: en un
      archivo anterior "fsr1" solo escalaba la imagen final de 1080p a una ventana mayor, así que carga como No, salvo
      los de versión 1 cuya resolución interna era una parte de la pantalla (75 %, 50 %, 25 %), que siguen con FSR 1
      en el modo más cercano. Lo que faltaba para que BOTW funcionara escalado:
@@ -594,7 +741,7 @@ Pendiente:
        dirección mantenida y algunas pulsaciones largas.
      Lo que hace Savage Wind (`runtime/hle/framepace.c`, dos parches en `tools/patches.py`):
      - `present_pace` espera el turno de cada presentación en una rejilla fija de 1/frecuencia (un frame tardío por
-       menos de un periodo no la mueve; uno más largo la reinicia). Sin límite: 300 FPS como mucho (con pasos más
+       menos de un periodo no la mueve; uno más largo la reinicia). Sin límite: 360 FPS como mucho (con pasos más
        cortos los relojes float del juego pierden precisión). La espera del bucle (0x7000d811fc) se salta.
      - Dentro de `updateInterval`, después de que el juego pone su razón y antes de los multiplicadores y los deltas,
        `rt_vfr_update` pone la duración real: razón = segundos x 30 (0,5 a 60 FPS, 0,25 a 120). Cuando las
@@ -620,6 +767,76 @@ Pendiente:
        vídeo (`movie.c`: decodificador de vídeo arrancado): las cinemáticas prerrenderizadas (`Movie/Demo*.webm`)
        son de 30 FPS.
      - La lógica 2↔3 del juego queda con máximo 2 (`SAVAGEWIND_MAX_INTERVAL` vale 2 por defecto).
+     - Pasos por actualización sin delta (#144): en su caída una flecha suma su gravedad (ArrowGravity, el vector
+       en +0x104 del estado de su vuelo) una vez por actualización (1.9.0 0x70005ee668): por encima de 30 FPS caía
+       2 o 4 veces más rápido por segundo y llegaba más corto. El parche `arrow_fall_gravity` multiplica su parte Y
+       por la razón del frame (`rt_arrow_gravity`, 1 a 30 FPS, sin la cámara lenta, como en la consola). Prueba:
+       `SAVAGEWIND_LOG_ARROW=1` y `SAVAGEWIND_SCRIPT_CLOCK=1` disparando con ZR a 30, 60 y 120: la velocidad en el
+       tiempo es la misma.
+     - Micropasos del solver de Havok (#161): antes de cada paso de física el juego le da al solver
+       round(delta frame x 6) micropasos (1.9.0 0x700156f930): 6 a 30 FPS, 3 a 60, 2 a 120, siempre la misma
+       duración de micropaso. Con menos micropasos por paso el solver cede más ante lo que toca a Link: con un cuco
+       en brazos (su cuerpo justo encima de la cabeza) el salto subía 0,63 m a 30 FPS, 0,45 a 60 y 0,2-0,25 por
+       encima de 90. El parche `phys_solver_steps` da 6 / raíz(delta frame) en pasos más cortos (8,5 a 60, 12 a 120;
+       `rt_solver_steps`, `SAVAGEWIND_SOLVER_STEPS=0` deja la cuenta del juego). Con 6 por paso todavía quedaba en
+       0,56 m a ~90 FPS. Prueba (corridas ocultas en Kakariko, `SAVAGEWIND_TEST_WARP=1834.4,221.9,959.0`, coger el
+       cuco con A y saltar con X, altura de Link en PlayerInfo +0x8c): 0,634 m a 30, 0,640 a 60, 0,639 a ~85-120;
+       el salto normal sigue en 0,68.
+     - Bruma (Vídeo > Opciones avanzadas > Bruma, `haze` en el ini, `services/fs.c` `haze_patch`): la neblina del exterior de BOTW es su
+       dispersión atmosférica, por clima en `Pack/TitleBG.pack` `WorldMgr/normal.bwinfo` (AAMP, 20 climas en el objeto
+       raíz): `CalcMie` y `CalcRayleigh` (lo blanco y lo azul del aire: más bajos, más claro; a 0,6x el cielo se oscurece
+       y vira a turquesa) y `CalcSfParamNear` (0 o negativo: la bruma de cerca, la mínima en 0). El ajuste k (75-100 %)
+       da 0,7 + 0,3 k veces los dos primeros y k veces el tercero, como un parche de lectura sobre los bytes del archivo
+       (mismo tamaño; AAMP comparte los valores iguales entre parámetros: cada uno se cambia una vez). El juego lo lee
+       al arrancar: el cambio vale desde el siguiente inicio. 100 % no toca nada. Los objetos Fog de los perfiles de
+       entorno (`Env/env.sgenvb`, `fog_world` etc.) se probaron antes: a 0 no cambian nada visible. Comparado desde la
+       torre de Hebra a mediodía con cielo despejado (bruma 50 %: montañas lejanas con su color, cielo azul).
+     - Preset gráfico y Opciones avanzadas (Alpha 5, `settings.c` `k_gpreset`, `vulkan/exec.c`): el preset fija a la vez
+       distancia de dibujado, resolución de sombras, bloom, profundidad de campo y resolución dinámica. Potato: distancia
+       Potato, sombras 448, sin bloom ni desenfoque lejano, resolución dinámica; Original: como la consola; High: distancia
+       "High" (`medium` en el ini), sombras 2048; Savage: distancia "Savage" (`high` en el ini), sombras 4096. Lo que no
+       coincide con ninguno se muestra como Personalizado. Bloom off (`bloom = 0`): los draws del bloom
+       (`bloom_scale.h` `bloom_native_target`) limpian su imagen a negro en vez de dibujar; profundidad de campo off
+       (`depth_of_field = 0`): se salta el desenfoque lejano (fs f7731492223eb16a). Resolución dinámica
+       (`dynamic_resolution = 1`): los ReportCounter llevan su tiempo real y el juego baja su 3D de 1600x900 hacia
+       1280x720 cuando el fotograma tarda (como `SAVAGEWIND_VK_COUNTER=live`). Densidad de pasto: pendiente, no se
+       encontró aún el draw de las hojas de pasto.
+     - Giro de los cuerpos que mueve el juego (#209): las piezas "keyframed" (el suelo de una Bestia Divina al
+       inclinarse, ascensores, puertas) reciben cada fotograma un objetivo (FUN_710130d19c, una matriz 3x4) y cada paso
+       de física la velocidad que las lleva a él (1.9.0 0x70012d5598): la angular sale del ángulo del giro que falta,
+       que Havok calcula como 2 acos(|w|) de su cuaternión (`hkQuaternion::getAngle`, 0x70000b06d4). Por debajo de
+       ~1 mrad, w redondea a 1 en float y el giro se lee como nulo. A 30 FPS el suelo de Vah Medoh gira ~1,7 mrad por
+       fotograma; a 120, 0,43: se quedaba quieto 1-3 pasos y luego recuperaba de golpe (0,0828 x raíz(1, 2, 3, 4)
+       rad/s para un giro constante de 0,0523), y Link encima daba saltitos (en el aire la mitad de los fotogramas,
+       relanzado al tocar el suelo). El parche `kf_angle` sustituye esa llamada por `rt_kf_angle`:
+       2 atan2(|xyz|, |w|), el mismo ángulo sin el redondeo (`SAVAGEWIND_KF_ANGLE=0` deja el del juego). Medido con
+       Link quieto sobre Medoh inclinándose a 120 FPS: velocidad angular del suelo constante (pasos parados del 49 % al
+       3 %, solo al arrancar o parar el giro); variación de la velocidad vertical de Link de 0,9-1,6 m/s a 0,07-0,13
+       (a 30 FPS, 0,04-0,05).
+     - Desactivación de Havok (#398): Havok decide que un cuerpo se ha parado contando pasos de física, y el juego da
+       uno por fotograma. (1) Cada cuerpo (hkpMotion +0xd) mira cada 4 pasos si sigue a menos de 2 cm de donde estaba
+       (cada 16, a menos de 8 cm); con 6 seguidas su isla se duerme (1.9.0 0x700011f95c sin restricciones,
+       0x70001207cc con ellas; el contador del mundo +0x3ef, 0x70000f5e20 y 0x700012644c, alterna los avisos de las
+       comprobaciones): 24 pasos son 0,8 s a 30 FPS y 0,07 s a 360. (2) En su último paso el solver frena a un cuerpo
+       más lento que los umbrales de su clase de desactivación (x 0,968 / 0,953 / 0,94 / 0,936) y lo para por debajo de
+       su velocidad de sueño (hkpWorld +0x314, 0x20 por clase: +8 el multiplicador, +0xc la velocidad de sueño; 1.9.0
+       0x7000148834). Desde el reposo un cuerpo gana gravedad x paso en un paso: a 360 FPS la doceava parte que en un
+       fotograma de la consola, por debajo de la velocidad de sueño, y se paraba otra vez en cada paso. En Ree Dahee la
+       bola cae en la rampa larga subiendo, se para un instante y vuelve a bajar hacia su interruptor: a 260-360 FPS se
+       dormía en ese instante (velocidad 0, isla inactiva, contadores 7/3) y no se movía más; a 60 bajaba (sondas de la
+       bola cada 0,1-0,4 s con el endpoint de control, `mem read` del hkpWorld [[[[0x7001e96888]+0x30]]+8]). Los
+       parches `phys_tick`, `phys_tick_mt`, `phys_motion_tick` y `phys_motion_tick_c` (`rt_phys_tick`,
+       `rt_phys_ticked`) cuentan fotogramas de la consola por mundo (la razón del fotograma, sin la cámara lenta) y
+       solo el paso que completa uno cuenta las comprobaciones: todos a 30 FPS (lo del juego), uno de cada 2 a 60, uno
+       de cada 12 a 360. El solver frena y para en todos los pasos, a escala de su duración r en fotogramas de la
+       consola (1 como mucho): el multiplicador elevado a r y la velocidad de sueño x r, porque lo que un paso suma a
+       la velocidad de un cuerpo es proporcional a su duración: frena lo mismo por segundo que en la consola y se para
+       cuando allí se pararía, y los pasos entre dos fotogramas siguen amortiguando lo que está entre dos empujes.
+       `SAVAGEWIND_PHYS_TICK=0` deja el juego como estaba. Probado con la partida del jugador en Ree Dahee: la bola
+       baja hasta su interruptor sin límite (~180-360 FPS), a 120, 60 y 30 (a 30, los valores y el ritmo del juego
+       sin cambios). Aparte, sin relación con esto: a 120 FPS y sin límite el interruptor de suelo con Link encima
+       tiembla ~1 cm (el botón, un cuerpo dinámico entre el impulso de su IA, el límite de su guía y el peso de Link;
+       medido 9-12 mm de pico a pico con `SAVAGEWIND_PHYS_TICK=0` también); a 60 y 30 no.
      - Vsync: Vídeo > Sincronización vertical (ver "VSync y VRR" abajo). Por defecto Rápida (MAILBOX), sin tearing;
        cada refresco muestra la imagen más nueva. Una frecuencia que divide la del monitor (60 en 60/120/240 Hz) es
        la más fluida; una que no (60 o 90 en 144 Hz) alterna 2 y 3 refrescos por imagen; por encima de la del
@@ -732,6 +949,11 @@ Pendiente:
        a compilar. Sin instrucciones FMA `simd.h` usa su propio fma (`simd_softfma.h`, que sigue al MXCSR como
        ellas; `tools/test_softfma.c` lo compara bit a bit): el de glibc se equivoca con FTZ / DAZ o redondeos
        dirigidos. `SAVAGEWIND_COMPAT_CPU=1` elige el compatible en cualquier CPU (para comparar los dos).
+       Ese fma exacto le cuesta ~10% de fps al compatible (4 núcleos, 720p: Kakariko 134 frente a 154). Por eso
+       "Cálculo rápido" (Video > Opciones avanzadas, `fast_fma`, solo en esas CPUs, activado por defecto) lo cambia
+       por x*y + z con dos redondeos (`simd_fma_unfused`, que el runtime pone en la librería por `GameLibTables`
+       una vez por frame, `gamelib_sync`): 151 fps, a ~2% del v3. El último bit de algunos resultados puede salir
+       distinto del de la consola. `SAVAGEWIND_FAST_FMA=0/1` manda sobre el ajuste; el log dice cuál está activo.
      - Unos ~10 dispatches por frame escriben en la memoria del juego con STG (sus storage buffers, 7-8 por dispatch,
        pequeños, en el heap importado), el primero ~100 draws dentro del frame. Para no copiar en la CPU memoria a
        medio escribir, el resto de la lista iba a la GPU de una vez al final: la GPU esperaba a que se tradujera todo
@@ -742,12 +964,33 @@ Pendiente:
        espera antes a la GPU (0 veces en el paseo). La lista sigue yendo a la GPU por partes. Un shader que escribe
        sin storage buffers (o con el conjunto lleno) retiene el resto de la lista como antes;
        `SAVAGEWIND_VK_GMEM_HOLD=1` retiene siempre.
+     - El hilo principal esperaba en `nvnSyncWait` a que la GPU acabara el frame que se acababa de entregar, y solo
+       entonces el de render entregaba el siguiente: la GPU se quedaba parada desde el final de cada frame hasta que
+       llegaba el primer trozo traducido del siguiente (~5 ms de ~22 en el mundo con una Radeon 660M, y el driver le
+       bajaba el reloj de ~1890 a ~1570 MHz). Ahora esa espera va un frame tarde, como en LAS Recomp (3fc84bd en Metal,
+       13398126d66a en Vulkan): esperar el fence N espera el que se dejó la vez anterior y vuelve, así que como mucho
+       hay dos frames de GPU en cola y nunca se aplaza un fence ya alcanzado (`renderer_wait_seq`). Lo que el juego
+       escribe mientras es su frame siguiente, que tiene doble búfer como en la consola; los constant buffers se copian
+       al traducir. Los render targets que lee la CPU (cielo, exposición, ocho de 128x128 por turnos) llegan un frame
+       después, salvo uno que no se ha leído en los últimos 16 frames (la foto de la cámara): la espera sobre su envío
+       es completa. Medido con 2+2 pasadas alternas (Kakariko, establo y Hateno, sin límite de FPS, 1280x720): 40,1 →
+       54,0, 47,8 → 63,6 y 51,5 → 59,0 fps; la GPU ocupada del 74-83 % al 98-99 %. Sin saltos de brillo en 60 capturas
+       seguidas de día, de noche, con lluvia y dentro de Vah Ruta, y la foto de la cámara correcta.
+       `SAVAGEWIND_GPU_OVERLAP=0` lo quita.
      Además:
      - Copias de constant buffers: se comparten en toda la lista (antes, solo dentro de cada trozo de ~300 draws que
        va a la GPU) y `UpdateUniformBuffer` (~450 por frame en el mundo, sobre solo ~40 rangos pequeños) invalida solo
-       las copias que tocan su rango (antes, todas). Lo que más se copia sigue igual: un buffer de 64 KB que el
+       las copias que tocan su rango (antes, todas). Lo que más se copiaba era un buffer de 64 KB que el
        shader indexa con un registro (se liga entero) y que `UpdateUniformBuffer` cambia 16 bytes entre draws
-       (~220 copias, ~14 MB por frame); cuesta ~6 % del hilo de la cola.
+       (~220 copias, ~14 MB por frame; ~94 % de los bytes de constant buffers copiados en Kakariko, el establo y
+       Hateno). Es el vertex shader que elige la cascada de sombra (`agl_technique`): recorre las cascadas con un
+       contador y lee menos de 400 bytes. El traductor (`cbuf_reach` en `translate.c`) recorre el programa con los
+       valores de registro que se conocen al traducir (constantes movidas, sumadas, desplazadas; los dos caminos de
+       un salto con condición desconocida) y, si todas las lecturas indexadas de un cbuf tienen el registro
+       conocido, `cbuf_size` es hasta dónde llegan y el cbuf deja de estar en `cbuf_dynamic`: se copia solo eso.
+       Lo que escribe cada instrucción sale del código que se emite para ella, así que lo que no se modela queda
+       desconocido (se liga entero, como antes). En BOTW se acotan 46 shaders de `agl_technique` (de 64 KB a
+       512-1024 bytes); la copia de memoria del juego baja de ~440 a ~40 MB por segundo.
      - Prioridades de los núcleos: Horizon da el núcleo al hilo de mejor prioridad en cuanto puede correr. El código
        generado no tiene puntos de expulsión propios y el núcleo solo cambiaba de manos en la siguiente syscall del
        que lo tenía: una vez por segundo un hilo de trabajos de BOTW (prioridad 48, núcleo 2) corre ~5 ms de código
@@ -837,6 +1080,42 @@ Pendiente:
      ninguna función pasa del 1 %; `rt_dispatch` 4 %), el resto esperas. `SAVAGEWIND_VK_LIST_STATS=1` (medir) mostró
      que un frame no se parte en listas independientes: ~2800 `CallCommands` por frame, ~1 draw cada una, todas usan
      estado puesto antes. Bajar la traducción a 4-5 ms pide traducir en paralelo (notas de la sesión).
+   - Render targets comprimidos en GPU integradas (2026-10-26): las imágenes de color se creaban con
+     `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` sin `VkImageFormatListCreateInfo`, y Mesa (RADV) les quita DCC antes de RDNA3
+     (`radv_are_formats_dcc_compatible`): ningún render target iba comprimido y cada clear escribía la imagen entera
+     (en una Radeon 660M, 36 clears por frame en Kakariko = 1,38 ms, ~0,18 ms por target de 1600x900; sin fast clears,
+     que en `GENERAL` exigen DCC). Ahora los render targets listan su formato y su par sRGB / UNORM (sin par: no son
+     mutables), como LAS Recomp 03ee802f; una vista en otro formato usa el propio (`vk_view_format`, con aviso en el
+     log: 0 en las pruebas). Solo los render targets: BOTW lee los bloques de una textura BC4 con una vista RGBA16, que
+     una lista rechazaría. Un target con feedback loop (el 0 del G-buffer: el terreno lo lee y lo escribe) se rehace
+     sin lista copiando su contenido la primera vez (`vk_texture_drop_format_list`): RADV no comprime en
+     `ATTACHMENT_FEEDBACK_LOOP_OPTIMAL` y lo descomprimía al empezar cada pase (0,12 → 1,39 ms por frame). Clears
+     1,38 → 0,83 ms. Por defecto en GPU integradas (en las dedicadas LAS lo midió algo más lento en una RTX 3080 Ti);
+     `SAVAGEWIND_VK_LEAN_USAGE=0` / `=1` lo fuerza. Medido sobre `test` (36a02bc, con #108), 3+3 pasadas alternas sin
+     límite de FPS a 1280x720: el establo del río 66,6 → 70,6 fps (+6,1 %) y la puerta de la Ciudad Gerudo 60,0 → 63,7
+     (+6,3 %), GPU por frame −5,9 y −7,1 %; Kakariko +1,6 % (dentro del ruido: una pasada con NPC delante).
+   - Hilo grabador (2026-10-26): con el CPU y la GPU en paralelo, la traducción de comandos (`sw-queue`) limitaba
+     Kakariko y la puerta de la Ciudad Gerudo en una Radeon 660M (el hilo al 98-99 %, la GPU al 88-96 %), y una
+     cuarta parte del hilo era RADV (construir los comandos de `vkCmd*`, escribir descriptor sets, los envíos). Ahora
+     esas llamadas las hace un hilo propio (`record.c`, de LAS Recomp bb52932, c2bdc17 y 76f4f21): `sw-queue` copia
+     los argumentos de cada llamada en un paquete de un anillo de 16 MB, en orden, y el grabador hace las llamadas en
+     ese orden. Distinto de LAS: los sets se asignan y sus pools se vacían en `sw-queue` (solo la escritura y el bind
+     son paquetes) y los pipelines van por handle. Los command buffers se reservan al arrancar (su pool es del
+     grabador); las esperas a la GPU esperan antes a que el grabador haya enviado (`rec_wait_submitted`), igual que el
+     present, cuyo semáforo binario tiene que estar enviado; `vkDeviceWaitIdle`, ImGui (solo cuando dibuja algo,
+     `menu_render_needed`) y FidelityFX graban en el command buffer ellos mismos tras vaciar el grabador
+     (`rec_drain`). `SAVAGEWIND_VK_RECORDER=0` hace las llamadas en `sw-queue` como antes (mismas llamadas, mismo
+     orden); apagado por defecto en los drivers Mali de ARM (LAS #358).
+     La validación de sincronización destapó un fallo que ya estaba: el pase de la ventana lee la imagen del juego,
+     escrita por los pases de un envío anterior, y solo la hacía visible la barrera completa del command buffer de
+     subidas cuando el envío del present tenía subidas. Con el grabador cambia cuándo llegan y salían 200 avisos
+     `READ_AFTER_WRITE` del draw del present; ahora `vk_frame_begin` empieza con una barrera completa (una por frame)
+     y quedan los 80 de antes (el feedback loop del terreno) en las tres escenas.
+     Medido con 3+3 pasadas alternas sin límite de FPS (1280x720; con el reloj del sistema en HPET y el portátil en
+     uso, ruido de FPS del 11-26 %): el tiempo de traducción por frame baja 24,5 % en Kakariko, 20,5 % en el establo
+     y 26,9 % en Gerudo; los FPS no se separan del ruido (+4,6, −3,2, +22,3 %). A 640x360 (GPU al 80 %) `sw-queue` pasa
+     de 0,96-0,98 núcleos a 0,73-0,83 en Kakariko y el establo, pero el hilo principal del juego sube a 0,79-0,86 y
+     limita él: en este portátil no hay más FPS. El grabador usa 0,37-0,48 núcleos.
    - Sombras del sol con depth clamp (2026-10-20): `nvnCommandBufferSetDepthClamp` no hacía nada. BOTW lo activa para
      sus tres cascadas de sombra del sol (un array D16 de 896x896x3, ~650-750 draws por frame) y para la consulta de
      oclusión del sol: lo que está más cerca de la luz que el plano cercano de una cascada se aplasta contra él en vez
@@ -850,6 +1129,21 @@ Pendiente:
      apagado). `SAVAGEWIND_NO_DEPTH_CLAMP=1` lo ignora (A/B). Metal (`renderer.m`): `setDepthClipMode`, sin compilar.
      La paleta de entorno (`fcb4` del shader de la máscara de sombras) pasa de la de interior a la de exterior en 60 s
      al salir del santuario y al cargar una partida afuera, y no vuelve a la de interior al regresar (ver abajo).
+   - Barreras por imagen entre pases (2026-10-26): cada pase empezaba con una barrera global (`ALL_COMMANDS`,
+     escrituras de memoria → lecturas y escrituras). Tras escrituras de attachments, RADV convierte una barrera global
+     en escribir e invalidar toda la L2, porque sin imagen no sabe si eran coherentes con ella
+     (`radv_src_access_flush` añade `AC_BARRIER_INV_L2`); con barreras por imagen no (`radv_image_is_l2_coherent`).
+     Si desde la última barrera completa solo hubo pases (ni copias, ni dispatch, ni subidas, ni escrituras a la
+     memoria del juego, ni lecturas de targets lineales: todo eso va tras una barrera completa, que marca
+     `bar_other`), la barrera del pase siguiente nombra las imágenes de esos pases (las de sus vistas de attachment,
+     tras `vk_view`) más una dependencia de ejecución para lo demás; una imagen diferida fuerza la completa.
+     `SAVAGEWIND_VK_FULL_PASS_BARRIER=1` vuelve a la barrera completa. La validación de sincronización
+     (`VK_LAYER_VALIDATE_SYNC=1` con `VK_LAYER_SYNCVAL_SHADER_ACCESSES_HEURISTIC=1`, mensajes con
+     `SAVAGEWIND_VK_VALIDATION=1`) da en las tres escenas los mismos avisos que antes (los del feedback loop del
+     terreno, dentro del pase) y ninguno entre pases; sin barreras de memoria entre pases da cientos. Medido sobre
+     `test` (36a02bc, con #108), 3+3 pasadas alternas sin límite de FPS a 1280x720 en una Radeon 660M: GPU por frame
+     −1,9 % en Kakariko, −1,1 % en el establo del río y −1,9 % en la puerta de la Ciudad Gerudo; FPS +1,3 % en
+     Kakariko (los otros dos, +1,1 y +0,8 %, dentro del ruido).
    - Fallos gráficos que quedaban en la Alpha 2 (2026-10-22):
      - Consulta de oclusión del sol: `ReportCounter` con `SAMPLES_PASSED` (tipo 1) devolvía siempre 0 muestras y
        `ResetCounter` no hacía nada. BOTW dibuja una vez por frame el disco del sol con prueba de profundidad y sin
@@ -922,9 +1216,21 @@ Pendiente:
      una copia del buffer del fragment shader (`sdw_patch`: busca el par exacto; ~10 por frame). El depth bias no se
      escala: la parte por pendiente ya depende del tamaño del píxel del mapa, y la constante (y el -0,002 que restan
      los shaders) es la de consola, que solo puede sobrar. Depth clamp sin cambios.
-     Lo demás que lee las cascadas: un downsample a 448x448x3 (`textureGather`, sin escalar: toma 2x2 texels del mapa
-     grande) y shaders de un solo tap sin offsets. Hay shaders con offsets fijos de ±1/4096 (sin constant buffer) para
+     Lo demás que lee las cascadas: un downsample a 448x448x3 R16 (`textureGather`, el máximo de cada 2x2) y shaders de
+     un solo tap sin offsets. El agua y las demás superficies forward (~20 fragment shaders) toman sus sombras de ese
+     downsample, con una sola muestra y coordenadas normalizadas: también va en `RS_SHADOW` (array 2D R16 cuadrado de
+     3 capas, sin flag de render target), escalado con el mismo factor que las cascadas (Extreme: 4096x4096x3). Sin
+     él, el agua seguía a resolución de consola (#101, 2026-10-25). La regla pide las 3 capas: una R16 de 1024x1024x8
+     que se rellena al cargar también casaba, y al cambiar el ajuste jugando se rehacía vacía y desaparecían el
+     terreno y la hierba. Hay shaders con offsets fijos de ±1/4096 (sin constant buffer) para
      otro mapa de sombras que no aparece en la meseta: si es de 2048, en Ultra quedaría con escalones (sin verificar).
+     Ese downsample R16 (y un array R32_SFLOAT de 4x4 que algunos compute shaders reciben en su slot de sombra) se
+     muestrea con comparación de profundidad, y ni la RTX 3060 ni AMD dan `SAMPLED_IMAGE_DEPTH_COMPARISON` a R16_UNORM
+     ni a R32_SFLOAT: indefinido (`VUID-vkCmd{Draw,DrawIndexed,Dispatch}-None-06479` con la capa de validación; #59).
+     Desde 2026-10-28 (`exec.c` `depth_twin_*`) esas imágenes tienen un gemelo D16 / D32 con los mismos bits, copiado
+     por un buffer fuera de los pases (tras cada pase que dibuja en el downsample; antes del dispatch en compute), y
+     sus lectores de sombra muestrean el gemelo. Validación sin 06479 y sin errores nuevos; en NVIDIA la imagen no
+     cambia. `SAVAGEWIND_NO_DEPTH_TWIN=1`: como antes; `SAVAGEWIND_DEPTH_TWIN_ALL=1`: gemelo para todo formato de color.
      Pruebas: `SAVAGEWIND_SHADOW_AT=<frame presentado>:<console|high|ultra|extreme|ancho>,...` (A/B en una corrida),
      `SAVAGEWIND_NO_SHADOW_TEXEL_FIX=<frame presentado>` (el tamaño de texel del juego desde ese frame).
      Costo (RTX 3060, ventana oculta de 1920x1080, meseta, mediana de 10 frames con `SAVAGEWIND_GPUPROF_AT`): los
@@ -934,8 +1240,12 @@ Pendiente:
      el tamaño del depth de cada pase (`pass: ... depth 896x896`).
    - Pantallas anchas y campo de visión (2026-10-24, issue #65): Vídeo > Llenar pantallas anchas (`wide_view`, Sí
      por defecto) y Vídeo > Campo de visión (`field_of_view`, 70-150 %), en Opciones del juego y en Configuración.
-     Solo ventanas más anchas que 16:9 (21:9, 32:9); las más estrechas (16:10, 4:3) siguen 16:9 con bandas: el
-     texgen de los paneles del HUD (el minimapa) no sigue una vista más alta.
+     Al principio solo ventanas más anchas que 16:9 (21:9, 32:9): en las más estrechas el minimapa salía roto.
+     Desde 2026-10-28 (#125) también las más altas (16:10, 4:3): la vista ve más arriba y abajo con la misma
+     horizontal (`rt_persp`: tan(fovy / 2) / shape), `rt_frustum` y `rt_persp_offset` en vertical, las tijeras que no
+     cubren la imagen final (la máscara del minimapa) y `hud_patch` (m11 x shape; un panel que cubre todo el alto
+     16:9 se estira a la ventana) igual que en horizontal; el menú de pausa y el mapa se muestran en la banda 16:9
+     del medio. El minimapa sale bien así (1280x800, 1680x1050).
      - El mundo: `output_scale` (con `reshape`) agranda todo render target 16:9 a la forma de la ventana, y el juego
        dibuja en ellos con sus vistas ensanchadas. `tools/patches.py` engancha las proyecciones de sead:
        PerspectiveProjection (vtable +0x58, la carga de tan(fovy/2) y aspect en `+0xac`/`+0xb0`, site `persp_matrix`;
@@ -953,13 +1263,89 @@ Pendiente:
        la consola no se ven) no se dibuja (`hud_clip`). Los scissors parciales del target final se comprimen igual
        (`scissor_rect`: la máscara del minimapa).
      - Menús: con el estado de pausa 2 (páginas del menú de pausa y mapa, `framepace_menu_ui`) se presenta el centro
-       16:9 de la imagen con bandas (`OutScale.crop`), igual que en una pantalla 16:9; el menú rápido (estado 4) y la
-       pantalla de carga llenan la ventana. La pantalla de título y sus menús (`framepace_title_ui`, pantallas 1 y
-       0x38) no se ensanchan.
+       16:9 de la imagen con bandas (`OutScale.crop`), igual que en una pantalla 16:9; el menú rápido (estado 4) llena
+       la ventana. La pantalla de título y sus menús (`framepace_title_ui`, pantallas 1 y 0x38) y la pantalla de carga
+       (`framepace_loading_ui`, pantalla 0x55, hasta que termina su fundido al juego; #98: ensanchada, el consejo iba a
+       los bordes de la ventana y el logo quedaba en el centro 16:9) no se ensanchan: 16:9 con bandas.
      - El FOV escala solo la cámara del mundo (far 25000; HUD, modelos de menú y título tienen 10000), nunca en eventos
        (`framepace_in_event`), con transición de 1/4 s. `SAVAGEWIND_LOG_PROJ=1` lista cada tipo de vista y los cambios
-       de FOV; `SAVAGEWIND_NO_HUD_FIX=1` quita `hud_patch`. Pruebas: `SAVAGEWIND_WINDOW_SHOT_AT=<frame>,...` guarda la
+       de FOV; `SAVAGEWIND_NO_HUD_FIX=1` quita `hud_patch`. Sombras del sol con FOV (2026-10-26, #162, #203, #148,
+       #168): `rt_persp` escribía de vuelta en la proyección de la cámara solo tan(fovy/2) y aspect (`+0xac`/`+0xb0`,
+       #103), pero el juego copia esa proyección a otra con getFovy (`+0xa0`, 1.8.2 `0x7100ddc818`) y setFovy, que
+       recalcula sin/cos/tan desde el ángulo: la copia (con la que se ajustan las cascadas) tenía el FOV del juego. Con
+       FOV 130 mirando abajo en la meseta, una franja del suelo lejano quedaba oscura con borde diagonal y faltaban
+       sombras en los bordes. Ahora también escribe fovy, sin y cos de su mitad (`+0xa0`/`+0xa4`/`+0xa8`); el juego
+       vuelve a poner su fovy cada frame (setFovy desde la cámara), así que no se acumula.
+       `SAVAGEWIND_NO_FOV_CAMERA_FIX=1`: solo tan y aspect, como antes. Pruebas: `SAVAGEWIND_WINDOW_SHOT_AT=<frame>,...` guarda la
        ventana tal cual se presenta (bandas y menús incluidos) en `build/frames/window_N.png`. Metal pasa `false`.
+   - Distancia de dibujado (2026-10-29, #88): Vídeo > Distancia de dibujado (`draw_distance` = original, medium,
+     high), en Opciones del juego y en Configuración; `runtime/draw_distance.c`. Original deja cada valor del juego
+     intacto. Tres partes, cada una con su site de `tools/game_sites.py` (grupos opcionales):
+     - Actores colocados (`traverse_scale`, `traverse_scale_default`; 1.9.0 `0x70010a4640`): cada actor del mapa
+       existe dentro de su distancia de recorrido de la cámara, su `traverseDist` de ActorInfo (100 si no tiene; árboles
+       y enemigos 150 m, rocas y edificios 300-3000 m, el modelo completo de un edificio con versión `_Far` ~500 m) por
+       una escala que el juego lee del gestor de depuración de actores (`+0x310` del objeto en `0x7001e39348`, que solo
+       existe con el heap "ActorDebug") o 1 sin él, como en el juego publicado. `rt_traverse_scale` la multiplica por
+       1,5 (Medium) o 2 (High), pero lo que tiene menos de 2000 m propios se queda en 2000 m como mucho: llevar actores
+       de 1000-2000 m a 3000-4000 m tiraba el juego al cargar el mundo en la meseta. Lo de 2000 m o más (los `_Far`,
+       el castillo, los modelos de roca de las montañas) escala como mucho 1,5 (`FAR_MAX`: a 2x parpadeaban y faltaban
+       bloques enteros de edificios lejanos en Tabantha, prueba del usuario). High usa 1,6 para los actores de menos de
+       2000 m (Medium 1,5): con una copia de una partida al 100 % en Kakariko, delante del castillo de Hyrule, el Bosque
+       Kolog, Lurelin, Hateno y la ciudadela Gerudo (andar y girar 4700 frames), delante del castillo faltaban el muro y
+       los estandartes desde 1,75x (1,75 x2, 2 x2, 2,25, 4) y estaban con 1, 1,5 x2 y 1,6 x2; la carga se caía desde 2,5x
+       (llamada nula desde `0x7001405cd8` o acceso a 0: 2,5 en Gerudo, 3 en el Bosque Kolog y Gerudo, 4 en Kakariko,
+       Hateno y Gerudo; 2,25 cargó en los seis sitios).
+     - Hierba (`grass_range` `0x70013ad8b0`, `grass_fade_blades` `0x70013a85d0`, `grass_fade_quads`
+       `0x70013baa5c`): cada capa (briznas: celdas de 3 m en una rejilla de 47, +-69 m; quads cruzados: 10 m, 59 celdas,
+       +-290 m) hace hierba en las celdas de una región delante de la cámara, las lista de la más cercana a la más
+       lejana y las dibuja apagándolas con la distancia. En juego (tan(fovy/2) 0,466): región de briznas ~24 m, fundido
+       de 8 a 21,5 m (clamp((1/(k·d) - 0,1)/0,17), k = max(tan(fovy/2), tan 10°), que el juego guarda una vez por frame),
+       lista 335-342 de 512, 64 de 256 celdas dibujadas; quads: región ~120 m, fundido hasta ~46 m, lista 718-768 de
+       768. La región es 1/(max(tan, s0)·s1) con los límites de tamaño en pantalla s1, s2 (briznas 0,0858 y 2, quads
+       0,0162 y 0,186) y como mucho 1/(s0·s1) = 66 m en las briznas (una vista estrecha), dentro de su rejilla.
+       Medium/High: `rt_grass_fade_*` divide k por el factor de la capa (la hierba se apaga más lejos); los quads solo
+       eso (1,6 / 2,5: su región ya llega); las briznas además la región (`rt_grass_range`: límites / factor, s0 x
+       factor, el máximo queda el del juego), con un factor que sigue su lista: sube 0,005 por frame con menos de 455
+       listadas, baja rápido con 485 o más y vuelve a 1 donde no hay hierba, hasta 1,15 (Medium) o 1,6 (High). Una lista
+       llena deja huecos en la hierba junto a Link (visto a 3x); con esto High se queda en ~1,31 (87-97 celdas dibujadas)
+       y la lista no pasó de 492 girando en la meseta y en el campo de Hyrule. El enganche anterior, solo la región, no
+       dibujaba hierba más lejos en juego (el fundido seguía donde el del juego). Pruebas: `SAVAGEWIND_GRASS_BLADES` /
+       `_QUADS=<x>`, `SAVAGEWIND_GRASS_PROBE=1` (regiones, listas y factores en el log) y
+       `SAVAGEWIND_DRAWDIST_AT=<frame>:<nivel>,...` (varios niveles en una sola corrida, con un mismo tiempo y cámara;
+       `framepace_script_now`).
+       Ronda 3 (2026-10-29): en High las briznas llegan a ~2,45x (fundido hasta ~53 m, 245-302 celdas dibujadas). Hizo
+       falta: 512 ranuras de dibujo en vez de 256 si el juego arranca en High (`grass_blade_slots` `0x70013a7230`,
+       `mov w1, #0x100`; y las dos pasadas que paraban en la celda 256, `grass_blade_cap_a/b` `0x70013b32e0`,
+       `0x7001496c40`, `cmp wN, #0xff`), y una región en cono pasada la distancia cercana del propio juego
+       (`grass_blade_lateral_near/far` `0x70013a8f0c`, `0x70013a8f20`: `fcmp s0, s6` / `fcmp s0, s7`, la prueba de
+       anchura de cada celda; las dos partes de la región son franjas tan anchas como la vista en su final y a 2,5x
+       listaban más celdas de las 512 que caben): ancho de la vista + 4 m, y la parte lejana solo 6 m más allá de la
+       cercana. Las celdas que lista el propio juego siguen. Las listas (struct en línea de 0x810 bytes: cuenta, 512
+       entradas y el puntero a las celdas en +0x808, que `0x70013afc0c` usa para las dos listas) no se tocan. Los quads
+       a 2,5x ya dibujaban hasta 127 m (su región los tiene). Medium y Original: los mismos valores del juego en todos
+       los sitios nuevos.
+       Ronda 4 (2026-10-30, prueba del usuario: "algo parpadea constantemente" solo en High): una tercera pasada se
+       quedaba en 256. `0x70013ae920`, una vez por frame (desde el intercambio de `0x7001493434`), apunta cada ranura
+       a la mitad de este frame de su bloque de shader doble (+0x41 la mitad, +0x10 el puntero) para las celdas
+       dibujadas, como mucho 256 (`cmp w8, #0xff` ... `mov w9, #0xff; csel`). Con más de 256 celdas (solo en High) las
+       ranuras de la 257 en adelante se quedaban en la otra mitad y su hierba salía, un frame sí y otro no, con los
+       datos de dos frames antes: manchas de hierba alta que parpadean. `grass_blade_cap_c` / `_c_max`
+       (`0x70013ae960`, `0x70013ae96c`) la llevan a la última ranura (`rt_grass_blade_swap_cap`; Original y Medium
+       arrancados así: los 255 del juego). Con la sonda (`SAVAGEWIND_GRASS_PROBE`, ranuras en otra mitad que la 0):
+       hasta 33 un frame de cada dos con la pasada de la ronda 3 (`SAVAGEWIND_GRASS_OLDSWAP=1`, pruebas), 0 ahora.
+     - Árboles lejanos del terreno (`tree_ranges`, `0x70013c94ac`, la entrada de su preparación de shader por frame):
+       tera::Core::Tree guarda en `+0x14cb0` dónde aparecen (100 m, fundido 100 m), hasta dónde llegan (4000 m,
+       fundido 500 m) y dónde cambian de detalle sus bloques (4000 m). El juego los vuelve a escribir mientras se
+       juega (unas dos veces por frame; el final a veces es 4444,5 m), así que `rt_tree_ranges` los pone cada vez al
+       último valor del juego por un factor: dónde aparecen y su fundido, por el de los actores (el juego acaba sus
+       árboles actor, 150 m, a mitad de ese fundido, 100-200 m; en High 240 m en 160-320 m), y hasta dónde llegan, su
+       fundido y el cambio de detalle, por el de los modelos lejanos (1,5). Pruebas: `SAVAGEWIND_TREE_NEAR` /
+       `_FAR=<x>`.
+     - El nivel de detalle del terreno no cambia: no se encontró una distancia que lo elija (ver
+       `issue-logs/88-draw-distance/results.md` fuera del repo).
+     Costo (RTX 3060, 1440p, SMAA, sin límite, meseta girando la cámara, 3 rondas alternadas, ronda 4): Original
+     76,9 fps (13,01 ms), Medium 71,5 (13,99 ms, +1,0), High 68,7 (14,55 ms, +1,5). `SAVAGEWIND_TRAVERSE_SCALE=<x>` y
+     `SAVAGEWIND_FAR_SCALE=<x>` (pruebas) fuerzan los factores de actores y modelos lejanos.
    - Overlay de rendimiento (F10: off, FPS, full; ajuste `perf_overlay`): FPS y ms del juego con gráfico, CPU (total
      y del juego), RAM, GPU (uso, temperatura, potencia, reloj, VRAM) por NVML, que trae el driver de NVIDIA
      (cargado en tiempo de ejecución), y en Linux amdgpu por sysfs. Temperatura de CPU: hwmon en Linux; en Windows
@@ -990,6 +1376,21 @@ Pendiente:
        en la que las entradas de los archivos redirigidos que crecieron crecen lo mismo (redondeado a 32, más 32):
        3428 archivos más grandes con JPja, 242 de ellos con entrada (los diálogos `.bfstm` no tienen). La copia va
        en Yaz0 de solo literales (~593 KB por 467 KB). Si el overlay de mods trae su propia RSTB, se deja la suya.
+     - Páginas de subtítulos (2026-10-26, issue #169, análisis de Igorms27): en las cinemáticas el juego pasa de
+       página en los marcadores (AMTA `MARK`: id, nombre, muestra, largo) de la línea en su banco de voz,
+       `Voice/<idioma>/<Demo>.bars`. Los bancos no tienen audio (está en `Stream_*/`): por línea, un AMTA con DATA
+       (su largo en muestras, lo único que cambia entre idiomas), los marcadores y su nombre; cada marcador lleva los
+       idiomas de texto a los que sirve (`USen,EUen`, `EUnl`, `EUfr,USfr`, `JPja`). Con el banco entero de otro idioma
+       el texto recibía marcadores ajenos: texto pt-BR (que usa `Voice/USen`) con voces JPja mostraba 5 de las 13
+       páginas de la revelación del rey (`Demo154_1`). Ahora `bars_hybrid` (`fs.c`) deja el banco de la ruta (sus
+       marcadores) con el DATA de cada línea tomado del banco de las voces elegidas y los marcadores movidos por la
+       razón entre los dos largos; los bancos van juntos en un bloque en memoria y no cambian de tamaño, así que la
+       RSTB no crece por ellos (con JPja: 710 bancos así, 53 entradas de la RSTB crecidas en vez de 242). Los
+       `NV_Custom_*.bars`, que llevan sus sonidos dentro, se siguen redirigiendo enteros. Prueba: `TEST_WARP`
+       -811.8,268.5,1966.7 (techo del Templo del Tiempo) con `TEST_FLAGS` `FindDungeon_AllClear=1`,
+       `FindDungeon_Finish=0`, `IsPlayed_Demo154_1=0`, `Npc_King001_Disappear=0` lanza `FindDungeon`/`Demo154_0`,
+       que sigue en `Demo154_1` (antes, un tip pide Minus y luego B). Con texto pt-BR y voces JPja se ven las 13
+       páginas, a tiempo con la voz japonesa.
    - Menús traducidos (2026-10-16): la pantalla de inicio y el menú del juego siguen al idioma de texto (Auto: el
      del sistema). `tr("texto en inglés")` (`runtime/ui/i18n.mm`) busca el texto en la tabla del idioma,
      `runtime/ui/i18n/<idioma>.inc` (`T("English", "...")`; `""` deja el inglés). Los widgets de
@@ -999,7 +1400,7 @@ Pendiente:
      textos (`ui_merge_fallback_font`), y cada contexto rehace sus fuentes al cambiar el idioma.
      `tools/i18n_check.py` lista los textos que le faltan a cada tabla (`--missing <idioma>` los imprime como
      líneas `T(...)`); `SAVAGEWIND_MENU_LANG=<código>` (p. ej. `ja`) fuerza el idioma de los menús para probar.
-     Las doce tablas están completas (es, fr, de, it, nl, ru, pt, ja, ko, zh-Hans, zh-Hant, th). ImGui 1.91.9 solo
+     Las trece tablas están completas (es, fr, de, it, nl, ru, pt, ja, ko, zh-Hans, zh-Hant, th, he). ImGui 1.91.9 solo
      corta líneas en espacios: `third_party/imgui/imgui_draw.cpp` (`ImFont::CalcWordWrapPositionA`) lleva un
      parche local que también corta entre caracteres CJK, respetando la puntuación. El tailandés no separa
      palabras con espacios: sus textos llevan espacios entre frases, que es donde se cortan las líneas. Su fuente
@@ -1007,6 +1408,15 @@ Pendiente:
      del sistema (Leelawadee UI, Tahoma). ImGui no posiciona marcas combinantes con GPOS: las vocales y tonos de
      Noto Sans Thai tienen avance 0 y caen sobre la letra anterior, que se lee bien en los tamaños del menú.
      Dentro del juego, las páginas de Opciones se dibujan con la fuente tailandesa del propio juego.
+     El hebreo (`he`) no es un idioma de texto del juego: solo `SAVAGEWIND_MENU_LANG=he` lo elige. Se escribe de
+     derecha a izquierda: sus textos están en orden lógico (el de lectura) y cada línea se dibuja en orden visual,
+     con un subconjunto del algoritmo bidireccional de Unicode (`ui_visual_order` / `visual_line` en `i18n.mm`:
+     los tramos latinos y los números conservan su orden, el resto se invierte y los paréntesis se reflejan).
+     ImGui lo hace con otro parche local (`GImTextReorderLine`, `ImFont::RenderText`): corta las líneas sobre el
+     texto lógico, las reordena y alinea a la derecha las de un párrafo en el ancho de la más larga; la
+     disposición de los menús no se refleja. Las páginas de Opciones del juego reciben cada línea ya reordenada
+     (`put_text`) y necesitan una fuente del juego con hebreo. Fuente: Noto Sans Hebrew Medium (OFL,
+     `third_party/fonts/NotoSansHebrew`), y si falta, la del sistema (Segoe UI, Arial).
    - Ajustes dentro del juego (2026-10-18): la pantalla Ajustes del propio juego (pausa > Sistema > Ajustes, u
      Opciones en el menú del título) lleva las páginas de Savage Wind y sustituye al overlay en el juego (F1, Esc y el
      botón Home ya no lo abren; `SAVAGEWIND_OVERLAY=1` lo devuelve; Esc suelta el cursor). La primera página es una
@@ -1104,7 +1514,7 @@ Pendiente:
        imágenes y tarda minutos). `SAVAGEWIND_HIDDEN=1` corre sin ventana visible.
      - `SAVAGEWIND_SHADER_DUMP=1`: el código Maxwell de los shaders que no traducen, en `build/shaders/`.
      - `SAVAGEWIND_DEBUG_PASS_FROM=<n>`, `SAVAGEWIND_DEBUG_PASS_TO=<n>` y `SAVAGEWIND_DEBUG_MAIN_ONLY=1` (con el
-       frame de depuración, F9): guarda solo esos pases y solo el primer target de cada uno. Con
+       frame de depuración, F9 en modo desarrollador, `SAVAGEWIND_DEV=1`): guarda solo esos pases y solo el primer target de cada uno. Con
        `SAVAGEWIND_DEBUG_FRAMES=<n>`, n frames seguidos (`build/pass_<frame>_NNN.png`).
      - F12: guarda una imagen del juego de cada dos en `build/frames/rec_N.png` hasta el siguiente F12, para ver
        parpadeos de un frame (el juego va más lento mientras graba).
@@ -1170,6 +1580,11 @@ Pendiente:
        `MaxHartValue=120,CurrentHart=120`, 30 corazones). Usar con una copia de la partida
        (`SAVAGEWIND_SAVE_DIR`): al guardar, el juego escribe esos valores. Continuar con
        `SAVAGEWIND_INPUT="155:A:4,187:A:4,213:A:4"`.
+     - En Linux, `tools/linux/test_run.sh <carpeta de una ranura> [segundos]` hace todo eso con una copia de la
+       partida en `build/test_run/` (ini propio, ventana oculta, "Continuar" con A): jugable hacia el frame 1100,
+       ~30 s. Pasa las `SAVAGEWIND_*` que se le den (`SAVAGEWIND_TEST_WARP=hateno`…); `TEST_INPUT` añade botones
+       del juego (formato de `SAVAGEWIND_INPUT`, `1400:PLUS:6` abre la Alforja) y `SHOTS=<n>` captura cada n frames.
+       Ojo: `pad:` de `SAVAGEWIND_HOST_INPUT` usa nombres de SDL (`start`, `south`), no `PLUS`.
      - En Git Bash, `VAR=1 timeout 60 ./build/savagewind.exe` no le pasa la variable al programa: usar
        `timeout 60 env VAR=1 ./build/savagewind.exe`. Con `/c/msys64/usr/bin` primero en el PATH, `env` es el de
        MSYS2 y tampoco ve las variables exportadas desde Git Bash: pasarlas como argumentos de `env`.
@@ -1180,6 +1595,53 @@ Pendiente:
 Se conserva todo lo genérico: el lifter AArch64 → C, el kernel HLE, IPC y servicios, el HLE de NVN
 con el backend Vulkan, el traductor de shaders Maxwell, ASTC, audio, la UI de ajustes y la
 compilación local con `zig cc`.
+
+## Heap invitado y memoria sparse de GPU
+
+En Windows, el juego pide un heap invitado de 3120 MiB. No se debe reducir a un límite estimado de VRAM: el código
+generado es código de CPU traducido, no un inventario estático de los recursos ni de las direcciones que leerán o
+escribirán los shaders. Limitar las páginas visibles a 1 GiB podría dejar lecturas sin datos o perder escrituras.
+
+La opción `sparse_heap` de `savagewind.ini` acepta `auto`, `on` y `off`. `auto` (por defecto) lo activa solo en una GPU
+integrada Intel cuya memoria compartida no llega a 6144 MiB (no cabe el heap entero más las texturas), y lo
+desactiva en las demás (#596, #619 y #695: las Intel con memoria de sobra fallaban en el código del juego con el
+heap sparse); el cambio se aplica al reiniciar. `SAVAGEWIND_VK_SPARSE_HEAP=1` fuerza
+la activación y cualquier otro valor explícito la desactiva. En GPUs compatibles, conserva el espacio de direcciones
+completo del heap y crea un buffer Vulkan sparse virtual de hasta 3328 MiB. Las páginas confirmadas del heap se
+exponen por ventanas de 1 MiB (alineación sparse de 64 KiB), mediante importación de la memoria host ya existente y
+enlaces sparse; no se copian las páginas a un pool de VRAM separado. En una Intel UHD, la memoria de GPU es memoria
+del sistema compartida. El tamaño virtual del buffer y los bytes enlazados no significan que exista esa cantidad de
+VRAM dedicada ni que el contador de memoria compartida de Windows aumente en la misma cantidad.
+
+En un inicio directo del juego en Windows, Vulkan inicializa la ventana y selecciona la GPU antes del arranque del
+juego. Así `auto` ya conoce el adaptador cuando `SetHeapSize` decide entre confirmar el heap de inmediato o dejar que
+sus páginas se confirmen al usarse; sin esa selección temprana, el modo `auto` podía elegir el camino eager antes de
+saber que la GPU era Intel integrada. Desde la pantalla de inicio, la ventana y Vulkan ya se inicializan antes de
+iniciar el juego.
+
+Las ventanas enlazadas quedan enlazadas hasta limpiar el backend: no hay política de desalojo ni recarga de páginas
+en este mecanismo. Solo se omite la validación de rango del sistema operativo cuando la tabla confirma que todas las
+ventanas del rango están enlazadas; los rangos no confirmados siguen el camino de compromiso y validación normal.
+Esta ruta evita repetir consultas caras de memoria sin cambiar el tamaño del heap ni asumir que cualquier rango es
+seguro.
+
+La prioridad Vulkan de memoria es independiente del heap sparse y está desactivada por defecto. Para probar la
+política de prioridad del driver en imágenes y en el heap denso importado, iniciar con
+`SAVAGEWIND_VK_MEMORY_PRIORITY=1`. Sin el flag, las imágenes usan el asignador normal de VMA y no se solicita
+prioridad para la memoria importada. `VK_EXT_memory_budget` permanece habilitada cuando existe: da información de
+presupuesto a VMA y se consulta para diagnosticar fallos de asignación; no habilita la política de prioridad.
+
+### Diagnóstico de rendimiento
+
+En las pruebas con BOTW 1.8.2 en una Intel UHD, la configuración aceptó el heap de 3120 MiB y llegó a gameplay.
+Con FSR 1 Ultra Performance la escena se renderizaba a 640x360 y se ampliaba a 1280x720. El log sin perfil de GPU
+se estabilizó aproximadamente en 22-25 FPS (con intervalos iniciales de 30 FPS). En esos intervalos de unos dos
+segundos, las estadísticas llegaron a alrededor de 130 000-150 000 draws, 650-750 MiB de cargas contabilizadas y
+900-1040 ms de esperas a la GPU. Son totales del intervalo, no valores por frame; las cargas contabilizadas tampoco
+son una medida directa del ancho de banda físico de la memoria. Cuando el juego ya estaba en la escena estable, las
+operaciones de importación y enlace sparse eran escasas o nulas aunque el FPS seguía bajo. Esto descarta el enlace
+sparse repetido como explicación suficiente del bajo rendimiento, pero no identifica por sí solo el cuello de
+botella entre trabajo de GPU, sincronización y trabajo del juego.
 
 ## Módulos en memoria
 
@@ -1323,6 +1785,200 @@ La 1.9.0 (2026-10-22, rama `game-1.9.0`; archivos del usuario en `extracted-1.9.
   ~300 por segundo (como 1.8.2: 30,02 / 1,00 / 5,7 / 8,2 / 305). Las mismas llamadas sin implementar que con 1.8.2.
   La preparación acepta la carpeta 1.9.0 (versión "1.9.0", 39008+ ficheros) y rechaza `exefs` 1.9.0 con `romfs`
   1.8.2 y al revés.
+
+## FSR 3 upscaling: held back for now
+
+AMD FSR 3.1 upscaling (PRs #194 and #195: per-object motion vectors, the five quality modes plus Ultra Performance) is
+built in, but Video > Upscaler doesn't offer it yet (`fsr3_upscaler_enabled` in `runtime/nvn/output_scale.c`). On an
+RTX 3060 the thread that records each frame for Vulkan limits 1080p and 1440p, and the motion vectors and FSR 3 add
+about 1.1 ms there, so every FSR 3 mode ran slower than native at those sizes; only at 4K did Balanced and up gain.
+It comes back with the redesign of the motion vectors planned for Alpha 6: recording them on the render thread costs
+1.2 ms a frame for 2969 draws, spread out (constant buffers 0.35, matching 0.24, frame start 0.16, program 0.15, per-draw
+setup 0.13, push 0.10), with no single defect. FSR itself costs next to nothing there (2026-11-09, 1440p Quality: 130 fps
+native, 104 with FSR 3, 130 with FSR 3 and `SAVAGEWIND_MVEC=0`). That work has to leave the render thread.
+Until then `SAVAGEWIND_FSR3=1` offers it for tests, and a settings file with `upscaler = fsr3` loads as AMD FSR 1 with
+the same quality mode. TAA (Video > Anti-aliasing) and frame generation stay available.
+
+## Frame generation (AMD FSR 3)
+
+Video > Frame generation (AMD FSR 3) (Off by default; `frame_generation = 0|1`; `SAVAGEWIND_FG=0|1` overrides it in
+tests) makes a frame between each two the game draws, with the frame interpolation and optical flow of AMD's
+FidelityFX SDK 1.1.4 (MIT, `third_party/FidelityFX`, see its README). Windows and Linux (Vulkan); no row on macOS.
+
+**Driving the SDK.** The SDK's own path is its frame interpolation swapchain: it replaces `vkCreateSwapchainKHR`,
+`vkAcquireNextImageKHR` and `vkQueuePresentKHR`, wants a present queue and an acquire queue the game never touches,
+paces the frames itself, and is Windows-only (`Windows.h`, Win32 threads and events). Savage Wind uses neither it nor
+the ffx-api DLL layer: `runtime/nvn/vulkan/framegen.cpp` does in C++ what the ffx-api provider
+(`ffx_provider_framegeneration.cpp`) does: a shared backend context for the resources the effects exchange (optical
+flow vectors and scene change detection, two sets of dilated depth, dilated motion vectors and the previous frame's
+reconstructed depth, which alternate), the optical flow context and the frame interpolation context. Per frame:
+frame interpolation's prepare (dilates the depth and motion vectors), the optical flow over the HUD-less image, the
+interpolation. All of it is recorded into the frame's own command buffer, on the game's queue, and the runtime keeps
+its own present thread, its HDR10 pass, the VSync modes and the window's crop. The SDK's shaders are built by
+`tools/ffx_shaders.py` (glslangValidator and a small SPIR-V reader for the bindings, in place of the SDK's
+Windows-only FidelityFX_SC.exe), only the permutations used: wave32, 32-bit floats, render-size motion vectors without
+jitter, both depth directions. `framegen.cpp` is the SDK's blob lookup (`ffxGetPermutationBlobByIndex`). The backend
+asks for a few extension functions it then calls unchecked (debug labels, `vkGetBufferMemoryRequirements2KHR`):
+`framegen.cpp` hands it no-ops or the core ones. Two changes to `ffx_vk.cpp`, for clang: the arrays in its scratch
+memory are 64-byte aligned (they were 4: clang's aligned SSE stores faulted).
+
+**Inputs** (`runtime/nvn/vulkan/exec.c`, "frame generation"):
+
+- The camera. The world's draws into the 3D scene's depth read a context constant buffer (`c3` of the vertex stage)
+  that holds, as floats, the view (0-11, a 3x4 matrix by rows), the view-projection (12-27), the projection (28-43,
+  OpenGL style, z -1..1), the camera's own matrix (44-55: right, up, back and position in its columns) and near / far
+  (56, 57). It was found by looking for the world camera's projection, known from `rt_persp`, in the bound constant
+  buffers. The world camera's buffer is the one with a perspective projection (row 3 = 0 0 -1 0) and a far plane over
+  10000 (25000; the HUD's layers and the menus' 3D models have 10000), on the depth target the most such draws use;
+  the 58 floats are copied at its first draw of the frame.
+- The depth: that target, at the 3D scene's size (`RS_SCENE`, the internal resolution), D32. OpenGL-style depth
+  (0 near, 1 far: not inverted, not infinite).
+- The motion vectors: BOTW has none. `fg_mv.frag` (`shaders.c`) takes each pixel's depth back to NDC, through the
+  previous frame's view-projection times this frame's inverse to where that point was, and writes the difference in
+  uv units (R16G16F, render size). Camera motion only: what moves on its own (Link, enemies, animals, grass and trees
+  in the wind, water, particles) gets the vector of a still object at its place, and the interpolation's optical flow
+  has to find the rest. Link gets his own: the camera orbits him, so on screen he stays where he is while the camera's
+  vectors took him along with the world behind him, and players saw a smear around him whenever the camera turned
+  sideways onto him (not from behind). His position (uking::act::PlayerInfo +0x88, read with the camera's buffer)
+  gives a box around him, his feet + 0.1 to 1.9 m and 0.7 m to each side, projected to the screen and to a depth
+  range; the pixels inside both (him, and a strip of ground at his feet) take the motion of his centre on screen
+  between the two frames. His limbs and what he holds are still the optical flow's. `SAVAGEWIND_FG_MV_DEBUG=1` paints
+  the box (red) and the pixels taken as him (yellow) into the motion vectors (dump them with
+  `SAVAGEWIND_FG_INPUTS_AT=<n>`); `SAVAGEWIND_FG_NO_LINK=1` leaves him out. That is the default again.
+  `SAVAGEWIND_FG_OBJECT_VECTORS=1` makes the per-object motion vectors too (`mvec.c`, from PR #194: every scene draw
+  matched with the previous frame's and run again on its inputs, jitter taken out), and frame generation takes them
+  when they are this frame's and at the depth's size (their .xy are clip-space NDC differences: FSR's motion vector
+  scale (-w / 2, h / 2), as for the FSR 3 upscaler). Link running, enemies and animals then interpolate without the
+  double image, but on grass and trees some draws match the wrong draw of the previous frame and get motion they
+  don't have (2026-10-28: the dumped vectors showed motion on standing trees and a grass blade with the camera still),
+  and the generated frames broke the grass around Link up while the camera turned: the flicker players saw. They also
+  cost ~0.6 ms of GPU and ~1.5-2 ms of CPU a frame (2560x1440, RTX 3060, no limit: 52-57 drawn fps against 54-59
+  with the camera's vectors). So they stay off for frame generation until the matching is right for foliage.
+- The HUD-less image: BOTW composites the scene into a linear 10-bit image of the final size (A2B10G10R10), draws the
+  HUD into that, then copies it sRGB-encoded into the 8-bit image it presents. The composite's target is copied right
+  after the composite (`scene_composite`, the draw `scene_post` also uses), before the next draw, the HUD's first,
+  with a blit into an sRGB image: that encodes as the game's copy does, and read through a UNORM view it matches the
+  presented image bit for bit where there is no HUD. The SDK tells the HUD apart by comparing the two, so the HUD, the
+  minimap and Savage Wind's overlay stay sharp in the generated frames (a raw copy of the 10-bit bits made everything
+  look like HUD, and the "generated" frames were the game's next ones).
+- A cut (a jump of over 10 m, or the view turned over ~35 degrees in a frame), a frame without all of the above, or
+  the first frame after the menus: no history (the SDK's reset). Its own scene change detection catches the rest.
+
+**Presenting** (`device.c` `present_locked`, `present_wait_turn`). The interpolated image is the game's final image
+(`RS_OUT`), so it goes through the same path as the game's frames: the crop and placement in the window (Fill wide
+screens, bars), SMAA or FSR 1 to the window's size, the F1 menu and performance overlay, the HDR10 pass. The display
+shows a frame when the GPU has drawn it, not when the CPU hands it over: the GPU runs a frame or two behind (present to
+shown ~33 ms at 50 drawn fps), and both frames of a pair are drawn within a millisecond of each other. So the present
+thread waits for each frame of a pair to be drawn (the submission's timeline value), presents the generated one at
+once and the game's half the time between generated frames later, as AMD's frame interpolation swapchain does. The
+presents queue up for it (the game's frame waits there while the next frame is drawn; plain presents stay one at a
+time, as before), and `vkAcquireNextImageKHR` / `vkQueuePresentKHR` share a lock (the swapchain is externally
+synchronized); the swapchain has one image more for the queued pair. Same scene as below, hidden window at 120 Hz,
+VSync On: presented every 8.6-9.6 ms with a standard deviation of 0.4-1.2 ms, present to shown 4-7 ms (17-20 ms
+without frame generation, where the CPU runs ahead).
+
+The first two versions spaced the presents by the CPU's clock (half the measured frame time, then whole refreshes):
+on the user's G-SYNC display both frames of a pair showed together, then a long gap, and the picture ghosted while the
+camera moved with VSync On, Fast or Adaptive (with Off, tearing hid it). The display's own times
+(`SAVAGEWIND_PRESENT_CSV`, VK_KHR_present_wait) showed it: intervals of 7-15 ms, not whole refreshes (G-SYNC on).
+
+**Frame rate.** Video > Frame rate counts the presented frames: with frame generation the game is paced at half of it
+(`framepace_period_ns`, `g_fg_active`): 120 shows 60 drawn + 60 generated, 60 shows 30 + 30, no limit draws as fast
+as it can (300 at most) and doubles that. The game's clock follows the frames it draws, as always. With VSync On or
+Adaptive the presented rate stays under the display's refresh rate as without frame generation (116 at 120 Hz).
+
+**When.** In play only: not on the start screen, in the pause menu or the map, or with the F1 menu open
+(`fg_wanted`): there the picture mostly stands still, and the game's own frames keep its cursor crisp. Cutscenes and
+talks are generated too. When it stops, the next frame starts without history.
+
+Tests: `SAVAGEWIND_FG_SHOT_AT=<frame>,...` saves two presents in a row from there, each generated frame and the
+game's frame after it (`build/frames/window_N_<0|1>_<gen|real>.png`); `SAVAGEWIND_FG_DEBUG_VIEW=1` shows the SDK's
+debug view (motion vector fields, optical flow, disocclusion) instead of the generated frames; `SAVAGEWIND_FG_LOG=1`
+why frames aren't generated; the `[fg]` lines count generated and presented frames every 2 s. `SAVAGEWIND_EXIT_AT=<frame>`
+ends a scripted run.
+
+**Measured** (2026-10-25, RTX 3060, Ryzen 5 5600X, hidden 2560x1440 window, HDR10 on, SMAA, no upscaler, VSync
+Off; the Great Plateau by the Temple of Time's walls, standing, then turning the camera; each line the mean over 2 s,
+from the runtime's `[vk]` and `[fg]` lines):
+
+| Frame rate | Frame generation | Drawn by the game | Presented |
+|---|---|---|---|
+| 60 | Off | 60 | 60 |
+| 60 | On | 30 | 60 (30 generated) |
+| 120 | Off | 106-118 standing, 81-89 turning | the same |
+| 120 | On | 60 standing, 59 turning | 120 standing, 117 turning |
+| No limit | Off | 108-118 standing, 82-90 turning | the same |
+| No limit | On | 71-78 standing, 56-59 turning | 142-155 standing, 112-118 turning |
+
+So with frame generation the game draws about 4 ms longer per frame here. GPU time per frame
+(`SAVAGEWIND_GPUPROF_AT`, which marks the frame generation steps): motion vectors 0.06 ms, the SDK's optical flow and
+interpolation 3.4 ms, the generated frame's own present (SMAA, the HDR10 pass) about 0.4 ms. `SAVAGEWIND_FG_TEST=1`
+makes the frame without presenting it, `=2` presents the HUD-less copy instead of interpolating (to tell the parts'
+costs apart: no limit, 113 drawn fps off, 72 with the interpolation alone, 98 with the second present alone). The
+SDK's 16-bit shaders (`FFX_HALF`, with shaderFloat16 on) were tried: no faster on the RTX 3060, so not kept.
+The performance overlay counts the presented frames with frame generation on (generated ones included); its frame
+time and graph are the game's frames. At 120 it
+holds 120 presented where the game alone doesn't, at the cost of drawing 60 (and the controls answering as at 60,
+half a frame later). Also tried: a 3440x1440 window with Fill wide screens and FSR 1 Quality (render 2293x960 -> 3440x1440,
+112-116 presented at 120), HUD 16:9 in the middle, the generated frames right.
+
+**What it looks like** (shots: `SAVAGEWIND_FG_SHOT_AT`, compared to the game's frames before and after; the generated
+frame's PSNR against each is 1.5-2.5 dB over theirs against each other, so it lies between them):
+
+- The camera turning, standing: clean. The world, Link standing, the HUD and the minimap as in the game's frames.
+- Running: Link himself ghosts. His motion isn't in the vectors (camera only), the optical flow finds part of it, and
+  what it misses is blended: at 30 drawn fps (60 presented) a clear double image of his legs, sword and bow in the
+  generated frames; at 60 drawn (120 presented) the same, smaller (a soft second outline of the legs and the sword).
+  On screen that shows as a faint shimmer around him while he runs. The grass in the wind moves too little to show.
+- The HUD is the game's newer frame's in both, so its animations (the minimap turning) step at the drawn rate.
+- Not looked at yet: enemies, horses, water, particles, fast cuts in cutscenes, and the image on a real display
+  (VSync On / FIFO, VRR, HDR10 brightness): the shots are taken from the window image before the present. Not
+  measured: the added latency. The Linux build of the SDK's sources (`ffx_compat.h` has what glibc lacks) isn't
+  tried yet.
+
+## Colour grading (Options > Colour)
+
+Options > Colour (the game's own Options screen; also the F1 menu's Video tab, section Colour) grades the 3D image:
+a preset, exposure (-2..+2 EV), contrast (-50..+50), saturation (-100..+100), temperature and tint (-100..+100), a LUT
+and its intensity (0-100%). ini: `colour_exposure` (EV), `colour_contrast`, `colour_saturation`,
+`colour_temperature`, `colour_tint`, `colour_lut` (`none`, `sw:<file>` shipped, `<file>` the player's),
+`colour_lut_strength` (percent). Windows and Linux (Vulkan); no page on macOS. Code: `runtime/color_grade.c` (presets,
+LUT folders and files), `exec.c` `scene_post` / `grade_lut` / `grade_wanted`, `shaders.c` `grade.frag`.
+
+**Where.** One fullscreen pass on the 3D scene at the scene -> final image composite (`scene_composite`), at the
+scene's own size and in its format (A2B10G10R10, linear light), before FSR 1's EASU / RCAS and CAS; the composite then
+samples the result (`scene_up`). The game draws its HUD after the composite, so the HUD keeps its colours (checked:
+the hearts' pixels are identical with every preset and LUT). Frame generation's HUD-less copy and its final image
+come after it, so real and generated frames are graded alike; HDR10's output pass (device.c `hdr_write`) converts the
+graded SDR image. With every setting neutral (or `SAVAGEWIND_SCENE_GRADE=0`) the pass doesn't run.
+
+**The pass.** In linear light: exposure x white balance as RGB gains (temperature moves red against blue by 0.3 x t,
+tint green by 0.2 x t, then normalised to the same Rec. 709 luma), saturation around luma. Then sRGB-encoded, as the
+picture is seen: contrast as an S curve through 0, 0.5 and 1 (slope 1 + contrast in the middle, so nothing clips),
+and the LUT (RGBA16F 3D texture, trilinear, sampled at texel centres: `u * (n - 1) / n + 0.5 / n`, after DOMAIN_MIN /
+MAX), mixed in by its intensity. Back to linear for the composite.
+
+**Presets.** Natural (neutral), Warm, Cool, Vivid, Cinematic, Muted: slider values only (`g_color_presets`), set by
+eye on the Great Plateau by day and in the evening. The preset row shows Custom when the sliders match none.
+
+**LUTs.** `.cube` (LUT_3D_SIZE 2..64, DOMAIN_MIN / MAX, TITLE and comments; 1D LUTs refused) and ReShade-style PNG
+strips (N*N x N: 1024 x 32, 4096 x 64; slice = blue, x = red, y = green). Listed: the shipped ones (`colour-luts/`
+next to the executable; `third_party/luts` in a source build: three CC0 LUTs from FreshLUTs, see its README) then the
+player's (`<data root>/luts/`, made at the first listing; rescanned each time the page opens). The first setup offers
+Savage Wind's own look (`COLOR_LUT_RECOMMENDED`, the shipped `Savage_Wind.cube` at 50% intensity,
+`COLOR_LUT_RECOMMENDED_STRENGTH`): the start screen's "Savage Wind colour look" toggle, on unless the ini already
+names a LUT (`colour_lut`, `none` included). Players' third-party packs (e.g. Nexus ones whose licence forbids
+redistribution) are never shipped: they load them themselves.
+
+**Cost** (RTX 3060, Great Plateau, `SAVAGEWIND_GPUPROF_AT`, three frames each): 0.10 ms at 1920 x 1080, 0.13 ms at
+2560 x 1440; the LUT adds 0.005-0.008 ms. Neutral: 0 (no pass).
+
+**Tests.** `SAVAGEWIND_COLOUR_AT=<frame>:<exposure>/<contrast>/<saturation>/<temperature>/<tint>/<LUT %>/<LUT>,...`
+(ascending; exposure in tenths of an EV; the LUT as the ini names it) changes the look during a run, for A/B shots of
+one view with `SAVAGEWIND_WINDOW_SHOT_AT`. Checked hidden: neutral, each preset, five LUTs; with AMD FSR 1 (Quality,
+1707 x 960 -> 2560 x 1440), with FSR 3 frame generation (generated and real frames graded alike) and with HDR10 on
+(hidden runs on the test PC are HDR10; the shots are the SDR image before the HDR pass, so the PQ output itself was
+not looked at on a display).
 
 ## Audio
 

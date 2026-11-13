@@ -1,0 +1,79 @@
+# Bug reports: checks that a report has savagewind.log, comes from the latest release and from game version 1.9.0.
+# When something is missing it adds the needs-info label and one comment saying what; when the report is edited or
+# its author replies with what was missing, it takes them away again. stale.yml closes needs-info issues after 7 days.
+# A maintainer can label an issue triage-ok to keep the check off it. Only reads the issue's text: no code from the
+# issue or the repository runs here.
+name: Bug report triage
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    if: >-
+      !github.event.issue.pull_request &&
+      contains(github.event.issue.labels.*.name, 'bug') &&
+      !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.issue.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const MARK = '<!-- savagewind-triage -->';
+            const LABEL = 'needs-info';
+            const issue = context.payload.issue;
+            const { owner, repo } = context.repo;
+            const number = issue.number;
+            // Reports opened before this check existed are left alone, and so is any issue a maintainer labelled
+            // triage-ok (the information came some other way).
+            if (new Date(issue.created_at) < new Date('2026-10-26T00:00:00Z')) return;
+            if (issue.labels.some(l => l.name === 'triage-ok')) return;
+
+            // The issue form's answers: "### <label>\n\n<answer>" blocks.
+            const section = (text, label) => {
+              const parts = (text || '').split(/^### /m);
+              const part = parts.find(p => p.startsWith(label + '\n') || p.startsWith(label + '\r\n'));
+              return part ? part.slice(label.length).trim() : '';
+            };
+            // A log: an attached file, or log lines pasted in.
+            const hasLog = text =>
+              /github\.com\/user-attachments\/(files|assets)\/|\[(vk|paths|gamelib|window|settings)\] /.test(text || '');
+
+            // Comments by the issue's author count too (a log sent as a reply).
+            let authorText = '';
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number });
+            for (const c of comments)
+              if (c.user && issue.user && c.user.login === issue.user.login) authorText += '\n' + c.body;
+
+            const body = issue.body || '';
+            const missing = [];
+            if (!hasLog(section(body, 'savagewind.log')) && !hasLog(authorText))
+              missing.push('- **savagewind.log** of the run where it happened. On Windows it is next to `savagewind.exe`, in ' +
+                           'the Savage Wind folder; on Linux, in `~/.local/share/savagewind/`. The game writes a new one ' +
+                           'each time it starts, so take it right after the bug, before starting the game again.');
+            const version = section(body, 'Savage Wind version');
+            if (/older release/i.test(version) && !/0\.3\.1|latest|re-?tested/i.test(authorText))
+              missing.push('- **The latest release**: please check whether the bug still happens there, and say so here.');
+            if (/1\.8\.2/.test(section(body, 'Game version')) && !/1\.9\.0/.test(authorText))
+              missing.push('- **Game version 1.9.0**: 1.8.2 is not supported. Please check whether it also happens on 1.9.0.');
+
+            const mine = comments.find(c => c.body && c.body.includes(MARK));
+            const labelled = issue.labels.some(l => l.name === LABEL);
+
+            if (missing.length) {
+              const text = `${MARK}\nThanks for the report! To look into it we still need:\n\n${missing.join('\n')}\n\n` +
+                           'Edit the issue or reply here with it. Reports still missing it after 7 days are closed ' +
+                           'automatically; you can reopen them any time.';
+              if (!labelled) await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [LABEL] });
+              if (!mine) await github.rest.issues.createComment({ owner, repo, issue_number: number, body: text });
+              else if (mine.body !== text) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body: text });
+            } else {
+              if (labelled) await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: LABEL });
+              if (mine) await github.rest.issues.deleteComment({ owner, repo, comment_id: mine.id });
+            }

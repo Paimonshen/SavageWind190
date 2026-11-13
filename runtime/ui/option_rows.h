@@ -13,6 +13,8 @@ void opt_section(const char *title);
 bool opt_toggle(const char *label, bool *v, bool def, const char *desc);
 // wrap: past the last value back to the first (and the other way); false: stops at the ends
 bool opt_choice(const char *label, int *v, const char *const *names, int n, int def, const char *desc, bool wrap = true);
+// a long choice: A / click opens the values as a list (*picked: one was picked there), left / right step through them
+bool opt_list(const char *label, int *v, const char *const *names, int n, int def, const char *desc, bool *picked);
 // a choice where some values can't be picked yet (avail[i] false: shown greyed when stepped onto, never stored): *v
 // keeps the last available value, *shown is the one on screen (-1: *v). True when *v changed.
 bool opt_choice_avail(const char *label, int *v, int *shown, const char *const *names, const bool *avail, int n, int def,
@@ -41,6 +43,12 @@ void opt_disable_next(void);
 // rows after this sit one step in (+1) or back out (-1): options that belong to the row above
 void opt_indent(int step);
 void opt_end(void);
+// A picture shown above the description while the row just drawn is hovered / selected (the Saves tab's save
+// pictures). Call it right after the row, every frame it is drawn; tex is the backend's ImTextureID.
+void opt_desc_image(unsigned long long tex, int w, int h);
+// An RGBA8 picture as the backend's ImTextureID (runtime/ui/saves_tab.mm), and giving it back
+unsigned long long ui_texture_rgba(const unsigned char *px, int w, int h);
+void ui_texture_free(unsigned long long tex);
 // the next page's first row takes the controller's cursor (Down on the tab bar: ImGui's own pick across the nested
 // panes was unreliable - some tabs went to a row further down, some nowhere). Cleared by the next opt_begin / call.
 void opt_focus_first(bool on);

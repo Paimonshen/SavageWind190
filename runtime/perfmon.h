@@ -13,6 +13,7 @@ extern "C" {
 typedef struct {
     // the game's frames (presents), over the last second
     float fps, frame_ms_avg, frame_ms_max;
+    float fps_generated;           // frames made by frame generation (Video > Frame generation), presented in between
     float frame_ms[PERF_HISTORY];  // oldest first
     // CPU: the whole machine and this process, percent of all logical cores
     char cpu_name[64];
@@ -26,8 +27,13 @@ typedef struct {
 } PerfStats;
 
 void perfmon_frame(void);                  // a game frame was presented (any thread)
+void perfmon_generated_frame(void);        // a generated frame was presented (vulkan/device.c)
 void perfmon_snapshot(PerfStats *out);     // the latest numbers (machine numbers refresh twice a second)
+bool perfmon_position(float out[3]);       // render thread: Link's position copy now; false when unavailable
 void perfmon_set_gpu_hint(const char *n);  // the Vulkan device's name: which GPU to report
+#ifdef __linux__
+void perfmon_set_gpu_drm(int major, int minor);  // selected Vulkan device's render (or primary) node
+#endif
 
 #ifdef __cplusplus
 }

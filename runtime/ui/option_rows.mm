@@ -3,7 +3,9 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <string>
+#include <vector>
 
 #include "imgui.h"
 #include "imgui_internal.h"  // (SetKeyOwner, NavCursorVisible)
@@ -15,6 +17,9 @@
 static float g_scale = 1;
 static std::string g_desc_hover, g_desc_focus, g_desc_shown;  // this frame's hovered / selected row, and the last shown
 static std::string g_desc_first;  // the page's first row (shown until a row is selected or hovered)
+struct DescImage { unsigned long long tex = 0; int w = 0, h = 0; };
+static DescImage g_img_hover, g_img_focus, g_img_shown;  // (the pictures of those rows: opt_desc_image)
+static std::vector<unsigned long long> g_img_live;       // the pictures offered this frame
 
 static const ImU32 kGold = IM_COL32(236, 194, 84, 255);
 static bool g_next_disabled;
@@ -28,11 +33,14 @@ void opt_indent(int step) { g_indent = g_indent + step < 0 ? 0 : g_indent + step
 
 void opt_begin(const char *id, float scale) {
     g_scale = scale;
+    static std::string page;  // (another page: its first row's description, not the last page's)
+    if (page != id) page = id, g_desc_shown.clear(), g_img_shown = DescImage();
     g_take_first = g_focus_req;
     g_focus_req = false;
     if (g_take_first) ImGui::NavMoveRequestCancel();  // (this frame's Down goes to the first row instead)
     g_indent = 0;
     g_desc_hover.clear(), g_desc_focus.clear();
+    g_img_hover = g_img_focus = DescImage(), g_img_live.clear();
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImGui::PushID(id);
     ImGui::BeginChild("##rows", ImVec2(avail.x * 0.48f, avail.y), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
@@ -140,6 +148,43 @@ bool opt_choice(const char *label, int *v, const char *const *names, int n, int 
     return true;
 }
 
+bool opt_list(const char *label, int *v, const char *const *names, int n, int def, const char *desc, bool *picked) {
+    int cur = *v >= 0 && *v < n ? *v : 0;
+    int step = row(label, tr(names[cur]), cur != def, desc, true, true);
+    *picked = false;
+    ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    ImGui::PushID(label);
+    static bool test_open;  // (test: SAVAGEWIND_OPT_LIST=<label> opens that list once)
+    const char *t = getenv("SAVAGEWIND_OPT_LIST");
+    if (step == 2 || (t && !test_open && !strcmp(t, label) && (test_open = true))) ImGui::OpenPopup("##list");
+    int nv = step == 1 || step == -1 ? (cur + step + n) % n : cur;
+    // the list below the row (above it when there's no room), the current value selected and in view
+    float rows_h = ImGui::GetFrameHeightWithSpacing() * 12;
+    bool up = b.y + rows_h > ImGui::GetMainViewport()->WorkPos.y + ImGui::GetMainViewport()->WorkSize.y;
+    ImGui::SetNextWindowPos(up ? ImVec2(a.x, a.y) : ImVec2(a.x, b.y), ImGuiCond_Appearing, ImVec2(0, up ? 1.0f : 0.0f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(b.x - a.x, 0), ImVec2(b.x - a.x, rows_h));
+    ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+    bg.w = 1;  // (opaque: the rows below don't show through)
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, bg);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImGui::ColorConvertU32ToFloat4(kGold));
+    bool open = ImGui::BeginPopup("##list");
+    ImGui::PopStyleColor(2);
+    if (open) {
+        bool appearing = ImGui::IsWindowAppearing();
+        for (int i = 0; i < n; i++) {
+            ImGui::PushID(i);
+            if (ImGui::Selectable(tr(names[i]), i == cur)) nv = i, *picked = true;
+            if (i == cur && appearing) ImGui::SetItemDefaultFocus(), ImGui::SetScrollHereY(0.5f);
+            ImGui::PopID();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+    if (nv == cur) return false;
+    *v = nv;
+    return true;
+}
+
 bool opt_choice_avail(const char *label, int *v, int *shown, const char *const *names, const bool *avail, int n, int def,
                       const char *desc) {
     int cur = *v >= 0 && *v < n ? *v : 0;
@@ -180,6 +225,12 @@ bool opt_int(const char *label, int *v, int lo, int hi, int step, int def, const
     if (n == *v) return false;
     *v = n;
     return true;
+}
+
+void opt_desc_image(unsigned long long tex, int w, int h) {
+    g_img_live.push_back(tex);
+    if (ImGui::IsItemHovered()) g_img_hover = {tex, w, h};
+    if (ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible) g_img_focus = {tex, w, h};
 }
 
 bool opt_button(const char *label, const char *desc) { return row(label, "", false, desc) == 2; }
@@ -226,9 +277,12 @@ void opt_end(void) {
     if (const char *t = getenv("SAVAGEWIND_OPT_SCROLL")) ImGui::SetScrollY(ImGui::GetScrollMaxY() * (float)atof(t));  // (test)
     ImGui::EndChild();
     // the description: the hovered row (mouse) wins, else the selected one (controller), else the last shown
-    if (!g_desc_hover.empty()) g_desc_shown = g_desc_hover;
-    else if (!g_desc_focus.empty()) g_desc_shown = g_desc_focus;
-    else if (g_desc_shown.empty()) g_desc_shown = g_desc_first;
+    if (!g_desc_hover.empty()) g_desc_shown = g_desc_hover, g_img_shown = g_img_hover;
+    else if (!g_desc_focus.empty()) g_desc_shown = g_desc_focus, g_img_shown = g_img_focus;
+    else if (g_desc_shown.empty()) g_desc_shown = g_desc_first, g_img_shown = DescImage();
+    bool live = false;  // (a picture whose row is gone may have been freed)
+    for (unsigned long long t : g_img_live) live |= t == g_img_shown.tex;
+    if (!live) g_img_shown = DescImage();
     ImGui::SameLine(0, 0);
     ImVec2 p = ImGui::GetCursorScreenPos(), avail = ImGui::GetContentRegionAvail();
     float gap = 24 * g_scale;
@@ -238,6 +292,15 @@ void opt_end(void) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * g_scale, 6 * g_scale));
     ImGui::BeginChild("##desc", ImVec2(0, avail.y), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
+    if (g_img_shown.tex && g_img_shown.w > 0) {  // the picture of the selected row, above its text
+        ImVec2 at = ImGui::GetCursorScreenPos();
+        ImVec2 room = ImGui::GetContentRegionAvail();
+        float w = room.x, h = w * g_img_shown.h / g_img_shown.w, most = room.y * 0.45f;  // (the text below has to fit)
+        if (h > most) w = w * most / h, h = most, at.x += (room.x - w) * 0.5f;
+        ImGui::Dummy(ImVec2(room.x, h + 8 * g_scale));
+        ImGui::GetWindowDrawList()->AddImageRounded((ImTextureID)g_img_shown.tex, at, ImVec2(at.x + w, at.y + h), ImVec2(0, 0),
+                                                    ImVec2(1, 1), IM_COL32_WHITE, 8 * g_scale);
+    }
     ImGui::SetWindowFontScale(1.3f);  // (the description reads at a glance)
     ImGui::PushTextWrapPos(0);
     ImGui::TextUnformatted(g_desc_shown.c_str());
